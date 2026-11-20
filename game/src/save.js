@@ -1,52 +1,58 @@
-'use strict';
-// Tallow Point — save slot (R4-3, fresh from the R4 spec).
-// One save object owns the whole round-trip: the base snapshot from
-// game.js (cash, clock, position, mission index) plus the story progress
-// (which jobs are done). NEW LIFE wipes both keys. Everything is guarded
-// — a corrupt or private-mode slot never throws into the game loop.
+// Tallow Point — save.js
+// Save / load localStorage (uang, posisi, misi, nyawa).
+// Ditulis fresh dari R5_SPEC_2026-11-19.md + R4_SPEC_2026-11-19.md (R5-3).
+// - Semua akses localStorage dibungkus try/catch (mode privat / headless
+//   bisa menolak) — game tidak boleh crash karena save gagal.
+// - Saat load, wanted selalu 0 (polisi bubar) dan pemain jalan kaki di
+//   posisi tersimpan; mobil pemain di-spawn ulang dekat safehouse.
+// - Versi save (v:1) supaya save lama yang tidak cocok diabaikan.
 
-const STORY_SAVE_KEY = 'tallow-point-story';
+import { SAVE } from "./config.js";
 
-function createSave(state, story) {
-  return {
-    // Write both keys; returns true only when both landed.
-    save() {
-      let ok = saveGame(state);
-      try {
-        const storyData = {
-          missionIndex: story ? story.index : 0,
-          done: story ? story.done.slice() : [],
-          savedAt: Date.now(),
-        };
-        localStorage.setItem(STORY_SAVE_KEY, JSON.stringify(storyData));
-      } catch (e) { ok = false; }
-      return ok;
-    },
-    // Read both keys and apply them onto the live state; false = no save.
-    load() {
-      const data = loadGame();
-      if (!data) return false;
-      applySave(state, data);
-      try {
-        const raw = localStorage.getItem(STORY_SAVE_KEY);
-        if (raw && story) {
-          const sd = JSON.parse(raw);
-          if (typeof sd.missionIndex === 'number') story.index = sd.missionIndex;
-          if (Array.isArray(sd.done)) story.done = sd.done.slice();
-          story.active = null;
-          story.dirty = true;
-        }
-      } catch (e) { /* story progress stays fresh */ }
+export const SaveManager = {
+  // state: {cash, life, armor, missionIndex, playerX, playerZ, clockMinutes}
+  save(state) {
+    try {
+      const data = {
+        v: 1,
+        cash: Math.floor(state.cash || 0),
+        life: Math.round(state.life || 100),
+        armor: Math.round(state.armor || 0),
+        missionIndex: state.missionIndex || 0,
+        playerX: state.playerX || 0,
+        playerZ: state.playerZ || 0,
+        clockMinutes: state.clockMinutes || 0,
+        savedAt: Date.now(),
+      };
+      window.localStorage.setItem(SAVE.key, JSON.stringify(data));
       return true;
-    },
-    // NEW LIFE: wipe the base snapshot and the story progress together.
-    wipe() {
-      clearSave();
-      try { localStorage.removeItem(STORY_SAVE_KEY); } catch (e) { /* ignore */ }
-    },
-    // True when a base snapshot exists (the story key is optional).
-    hasSave() {
-      try { return !!localStorage.getItem(SAVE_KEY); } catch (e) { return false; }
-    },
-  };
-}
+    } catch (err) {
+      return false;
+    }
+  },
+
+  load() {
+    try {
+      const raw = window.localStorage.getItem(SAVE.key);
+      if (!raw) return null;
+      const data = JSON.parse(raw);
+      if (!data || data.v !== 1) return null;
+      if (typeof data.cash !== "number" || typeof data.playerX !== "number") {
+        return null;
+      }
+      return data;
+    } catch (err) {
+      return null;
+    }
+  },
+
+  clear() {
+    try {
+      window.localStorage.removeItem(SAVE.key);
+    } catch (err) {}
+  },
+
+  exists() {
+    return this.load() !== null;
+  },
+};

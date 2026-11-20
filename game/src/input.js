@@ -1,70 +1,120 @@
-'use strict';
-// Tallow Point — keyboard + mouse input (R4-2, fresh from the R4 spec).
-// Tracks held keys and edge-triggered presses (E steal, R respawn, Space)
-// so the game loop reads one clean snapshot per frame. No DOM is touched
-// here; the loop decides what each axis means (walk, steer, turn).
+// Tallow Point — input.js
+// Keyboard + mouse (drag orbit) untuk R5-2.
+// Ditulis fresh dari R5_SPEC_2026-11-19.md + R4_SPEC_2026-11-19.md (R5-2).
+// - Keyboard: WASD / panah (jalan + mengemudi), E (masuk/keluar/curi mobil),
+//   Space (rem tangan), R (respawn — dipakai R5-3, sudah didengar di sini).
+// - Mouse: drag di canvas = orbit kamera saat jalan kaki (yaw + pitch kecil).
+// - `pressed(code)` = edge-triggered: true sekali per penekanan, lalu habis
+//   saat `endFrame()` dipanggil di akhir tiap frame game.
 
-function createInput() {
-  const held = {};
-  const justPressed = {};
-  let mouseDX = 0;
-  let dragging = false;
-  let lastX = 0;
+const PREVENT_DEFAULT = new Set([
+  "ArrowUp",
+  "ArrowDown",
+  "ArrowLeft",
+  "ArrowRight",
+  "Space",
+]);
 
-  function onKeyDown(e) {
-    if (e.code === 'ArrowUp' || e.code === 'ArrowDown'
-      || e.code === 'ArrowLeft' || e.code === 'ArrowRight' || e.code === 'Space') {
-      e.preventDefault();
-    }
-    if (!e.repeat) justPressed[e.code] = true;
-    held[e.code] = true;
-  }
-  function onKeyUp(e) { held[e.code] = false; }
-  function onMouseDown(e) { dragging = true; lastX = e.clientX; }
-  function onMouseMove(e) {
-    if (!dragging) return;
-    mouseDX += e.clientX - lastX;
-    lastX = e.clientX;
-  }
-  function onMouseUp() { dragging = false; }
+export class Input {
+  constructor(canvas) {
+    this.down = new Set();
+    this.justPressed = new Set();
+    this.orbitYaw = 0; // radian, diakumulasi dari drag mouse.
+    this.orbitPitch = 0; // radian, diklem kecil.
+    this._dragging = false;
+    this._lastX = 0;
+    this._lastY = 0;
 
-  window.addEventListener('keydown', onKeyDown);
-  window.addEventListener('keyup', onKeyUp);
-  window.addEventListener('mousedown', onMouseDown);
-  window.addEventListener('mousemove', onMouseMove);
-  window.addEventListener('mouseup', onMouseUp);
+    window.addEventListener("keydown", (e) => {
+      if (PREVENT_DEFAULT.has(e.code)) e.preventDefault();
+      if (e.repeat) return;
+      if (!this.down.has(e.code)) this.justPressed.add(e.code);
+      this.down.add(e.code);
+    });
+    window.addEventListener("keyup", (e) => {
+      this.down.delete(e.code);
+    });
+    window.addEventListener("blur", () => {
+      this.down.clear();
+    });
 
-  return {
-    // Snapshot for this frame: axes plus one-shot actions.
-    read() {
-      const forward = (held.KeyW || held.ArrowUp ? 1 : 0)
-        - (held.KeyS || held.ArrowDown ? 1 : 0);
-      const strafe = (held.KeyD ? 1 : 0) - (held.KeyA ? 1 : 0);
-      const turn = (held.ArrowLeft ? 1 : 0) - (held.ArrowRight ? 1 : 0);
-      return {
-        forward, strafe, turn,
-        run: !!(held.ShiftLeft || held.ShiftRight),
-        steal: !!justPressed.KeyE,
-        respawn: !!justPressed.KeyR,
-        shoot: !!justPressed.Space,
-        melee: !!justPressed.KeyF,
+    if (canvas) {
+      canvas.addEventListener("pointerdown", (e) => {
+        this._dragging = true;
+        this._lastX = e.clientX;
+        this._lastY = e.clientY;
+        canvas.setPointerCapture(e.pointerId);
+      });
+      canvas.addEventListener("pointermove", (e) => {
+        if (!this._dragging) return;
+        const dx = e.clientX - this._lastX;
+        const dy = e.clientY - this._lastY;
+        this._lastX = e.clientX;
+        this._lastY = e.clientY;
+        this.orbitYaw -= dx * 0.005;
+        this.orbitPitch = Math.max(
+          -0.25,
+          Math.min(0.35, this.orbitPitch + dy * 0.003)
+        );
+      });
+      const stop = () => {
+        this._dragging = false;
       };
-    },
-    // Mouse drag accumulated since the last frame (pixels, + = right).
-    takeMouseDX() {
-      const dx = mouseDX;
-      mouseDX = 0;
-      return dx;
-    },
-    // Clear edge-triggered presses after the frame consumed them.
-    endFrame() {
-      for (const k in justPressed) delete justPressed[k];
-    },
-    // Test helper: feed a press through the same path a real key uses.
-    press(code) {
-      justPressed[code] = true;
-      held[code] = true;
-    },
-    release(code) { held[code] = false; },
-  };
+      canvas.addEventListener("pointerup", stop);
+      canvas.addEventListener("pointercancel", stop);
+    }
+  }
+
+  isDown(code) {
+    return this.down.has(code);
+  }
+
+  // true kalau tombol baru ditekan sejak frame sebelumnya.
+  pressed(code) {
+    return this.justPressed.has(code);
+  }
+
+  // Dipanggil di akhir tiap frame game: edge trigger habis masa berlakunya.
+  endFrame() {
+    this.justPressed.clear();
+  }
+
+  // Arah jalan/mengemudi dari WASD/panah, relatif terhadap yaw kamera.
+  // Kembalikan {x, z} ternormalisasi di bidang XZ (x = kanan, z = maju),
+  // atau null kalau tidak ada tombol gerak yang ditekan.
+  moveVector() {
+    let x = 0;
+    let z = 0;
+    if (this.isDown("KeyW") || this.isDown("ArrowUp")) z += 1;
+    if (this.isDown("KeyS") || this.isDown("ArrowDown")) z -= 1;
+    if (this.isDown("KeyA") || this.isDown("ArrowLeft")) x -= 1;
+    if (this.isDown("KeyD") || this.isDown("ArrowRight")) x += 1;
+    if (x === 0 && z === 0) return null;
+    const len = Math.hypot(x, z);
+    return { x: x / len, z: z / len };
+  }
+
+  get throttle() {
+    return this.isDown("KeyW") || this.isDown("ArrowUp");
+  }
+
+  get brake() {
+    return this.isDown("KeyS") || this.isDown("ArrowDown");
+  }
+
+  get steerLeft() {
+    return this.isDown("KeyA") || this.isDown("ArrowLeft");
+  }
+
+  get steerRight() {
+    return this.isDown("KeyD") || this.isDown("ArrowRight");
+  }
+
+  get handbrake() {
+    return this.isDown("Space");
+  }
+
+  get interact() {
+    return this.pressed("KeyE");
+  }
 }

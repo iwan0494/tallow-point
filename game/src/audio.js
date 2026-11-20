@@ -1,169 +1,215 @@
-'use strict';
-// Tallow Point — local audio (R4-3, fresh from the R4 spec).
-// Every sound is synthesized with the Web Audio API: engine hum, crash,
-// gunshot, police siren and a quiet bass loop. No audio files, no fetch,
-// no network. The context is created lazily on the first user gesture
-// (browsers block autoplay) and every method is a no-op until it exists,
-// so a missing or suspended context can never crash the game.
+// Tallow Point — audio.js
+// Suara lokal (WebAudio): mesin, sirene, tembakan, tabrakan, uang, misi.
+// Ditulis fresh dari R5_SPEC_2026-11-19.md + R4_SPEC_2026-11-19.md (R5-3).
+// - Semua suara disintesis (oscillator / noise buffer) — TANPA file audio,
+//   tanpa network.
+// - AudioContext dibuat malas (lazy) saat gestur pertama pengguna (aturan
+//   autoplay browser); kalau gagal (headless tanpa perangkat audio), semua
+//   method jadi no-op dan game tetap jalan.
+// - Mute (tombol M) mematikan master gain, bukan menghentikan konteks.
 
-function createAudio() {
-  const audio = {
-    ctx: null, master: null,
-    engineOsc: null, engineGain: null, engineFilter: null,
-    sirenOsc: null, sirenGain: null, sirenT: 0, sirenHigh: false,
-    noiseBuf: null,
-    musicT: 0, musicStep: 0, musicOn: false,
-    muted: false,
-  };
+import { AUDIO } from "./config.js";
 
-  // Build the context and the always-on voices. Safe to call twice.
-  audio.init = function init() {
-    if (audio.ctx) {
-      if (audio.ctx.state === 'suspended') audio.ctx.resume();
+export class AudioSys {
+  constructor() {
+    this.ctx = null;
+    this.master = null;
+    this.muted = false;
+    this.engineOsc = null;
+    this.engineGain = null;
+    this.engineFilter = null;
+    this.sirenOsc = null;
+    this.sirenGain = null;
+    this._sirenPhase = 0;
+    this._sirenTimer = 0;
+    this._noiseBuf = null;
+    // Nyalakan konteks saat gestur pertama (klik / tombol apa pun).
+    const wake = () => this.ensure();
+    window.addEventListener("pointerdown", wake, { once: true });
+    window.addEventListener("keydown", wake, { once: true });
+  }
+
+  // Buat AudioContext + node persisten. Kembalikan false kalau tidak bisa.
+  ensure() {
+    if (this.ctx) {
+      if (this.ctx.state === "suspended") this.ctx.resume().catch(() => {});
       return true;
     }
     try {
       const AC = window.AudioContext || window.webkitAudioContext;
       if (!AC) return false;
-      const ctx = new AC();
-      audio.ctx = ctx;
-      audio.master = ctx.createGain();
-      audio.master.gain.value = audio.muted ? 0 : 0.5;
-      audio.master.connect(ctx.destination);
-      // One second of white noise, reused by crash and gunshot.
-      const len = ctx.sampleRate;
-      audio.noiseBuf = ctx.createBuffer(1, len, ctx.sampleRate);
-      const data = audio.noiseBuf.getChannelData(0);
+      this.ctx = new AC();
+      this.master = this.ctx.createGain();
+      this.master.gain.value = this.muted ? 0 : AUDIO.master;
+      this.master.connect(this.ctx.destination);
+      // Buffer noise putih (dipakai ulang tembakan + tabrakan).
+      const len = Math.floor(this.ctx.sampleRate * 0.25);
+      this._noiseBuf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+      const data = this._noiseBuf.getChannelData(0);
       for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
-      // Engine: a sawtooth through a lowpass, pitch follows speed.
-      audio.engineOsc = ctx.createOscillator();
-      audio.engineOsc.type = 'sawtooth';
-      audio.engineOsc.frequency.value = 55;
-      audio.engineFilter = ctx.createBiquadFilter();
-      audio.engineFilter.type = 'lowpass';
-      audio.engineFilter.frequency.value = 320;
-      audio.engineGain = ctx.createGain();
-      audio.engineGain.gain.value = 0;
-      audio.engineOsc.connect(audio.engineFilter);
-      audio.engineFilter.connect(audio.engineGain);
-      audio.engineGain.connect(audio.master);
-      audio.engineOsc.start();
-      // Siren: a sine that hops between two pitches.
-      audio.sirenOsc = ctx.createOscillator();
-      audio.sirenOsc.type = 'sine';
-      audio.sirenOsc.frequency.value = 700;
-      audio.sirenGain = ctx.createGain();
-      audio.sirenGain.gain.value = 0;
-      audio.sirenOsc.connect(audio.sirenGain);
-      audio.sirenGain.connect(audio.master);
-      audio.sirenOsc.start();
-      if (ctx.state === 'suspended') ctx.resume();
+      // Mesin: sawtooth + lowpass, gain kecil, jalan terus.
+      this.engineOsc = this.ctx.createOscillator();
+      this.engineOsc.type = "sawtooth";
+      this.engineOsc.frequency.value = 55;
+      this.engineFilter = this.ctx.createBiquadFilter();
+      this.engineFilter.type = "lowpass";
+      this.engineFilter.frequency.value = 420;
+      this.engineGain = this.ctx.createGain();
+      this.engineGain.gain.value = 0;
+      this.engineOsc
+        .connect(this.engineFilter)
+        .connect(this.engineGain)
+        .connect(this.master);
+      this.engineOsc.start();
+      // Sirene: square dua nada, gain 0 saat tidak ada polisi.
+      this.sirenOsc = this.ctx.createOscillator();
+      this.sirenOsc.type = "square";
+      this.sirenOsc.frequency.value = 720;
+      this.sirenGain = this.ctx.createGain();
+      this.sirenGain.gain.value = 0;
+      this.sirenOsc.connect(this.sirenGain).connect(this.master);
+      this.sirenOsc.start();
       return true;
-    } catch (e) { return false; }
-  };
+    } catch (err) {
+      this.ctx = null;
+      return false;
+    }
+  }
 
-  // One short tone: a tiny helper for chimes and the busted sting.
-  audio.blip = function blip(freq, dur, type, vol, when) {
-    if (!audio.ctx || audio.ctx.state !== 'running') return;
+  setMuted(muted) {
+    this.muted = muted;
+    if (this.master && this.ctx) {
+      this.master.gain.setTargetAtTime(muted ? 0 : AUDIO.master, this.ctx.currentTime, 0.05);
+    }
+  }
+
+  // Dipanggil tiap frame: nada mesin ikut kecepatan, sirene ikut wanted.
+  // opts: {speed (m/s), driving (bool), siren (bool)}
+  update(dt, opts) {
+    if (!this.ctx || this.ctx.state !== "running") return;
+    const t = this.ctx.currentTime;
+    if (this.engineOsc && this.engineGain) {
+      const target = opts.driving
+        ? AUDIO.engineGain * (0.5 + Math.min(1, Math.abs(opts.speed || 0) / 26))
+        : 0.015;
+      this.engineGain.gain.setTargetAtTime(target, t, 0.08);
+      this.engineOsc.frequency.setTargetAtTime(
+        50 + Math.abs(opts.speed || 0) * 5,
+        t,
+        0.1
+      );
+    }
+    if (this.sirenOsc && this.sirenGain) {
+      if (opts.siren) {
+        // Dua nada bergantian tiap 0,4 detik (wail polisi klasik).
+        this._sirenTimer += dt;
+        if (this._sirenTimer >= 0.4) {
+          this._sirenTimer = 0;
+          this._sirenPhase = 1 - this._sirenPhase;
+          this.sirenOsc.frequency.setTargetAtTime(
+            this._sirenPhase ? 880 : 660,
+            t,
+            0.03
+          );
+        }
+        this.sirenGain.gain.setTargetAtTime(AUDIO.sirenGain, t, 0.1);
+      } else {
+        this.sirenGain.gain.setTargetAtTime(0, t, 0.15);
+      }
+    }
+  }
+
+  _blip(freq, dur, type, gain) {
+    if (!this.ctx) return;
     try {
-      const t = audio.ctx.currentTime + (when || 0);
-      const o = audio.ctx.createOscillator();
-      const g = audio.ctx.createGain();
-      o.type = type || 'sine';
+      const t = this.ctx.currentTime;
+      const o = this.ctx.createOscillator();
+      o.type = type || "sine";
       o.frequency.value = freq;
-      g.gain.setValueAtTime(vol || 0.15, t);
+      const g = this.ctx.createGain();
+      g.gain.setValueAtTime(gain || 0.25, t);
       g.gain.exponentialRampToValueAtTime(0.001, t + dur);
-      o.connect(g);
-      g.connect(audio.master);
+      o.connect(g).connect(this.master);
       o.start(t);
       o.stop(t + dur + 0.02);
-    } catch (e) { /* keep playing */ }
-  };
+    } catch (err) {}
+  }
 
-  // A burst of filtered noise: crash thud or gunshot crack.
-  audio.burst = function burst(dur, freq, vol) {
-    if (!audio.ctx || audio.ctx.state !== 'running' || !audio.noiseBuf) return;
+  _noise(dur, filterFreq, gain) {
+    if (!this.ctx || !this._noiseBuf) return;
     try {
-      const t = audio.ctx.currentTime;
-      const src = audio.ctx.createBufferSource();
-      src.buffer = audio.noiseBuf;
-      const f = audio.ctx.createBiquadFilter();
-      f.type = 'lowpass';
-      f.frequency.value = freq;
-      const g = audio.ctx.createGain();
-      g.gain.setValueAtTime(vol, t);
+      const t = this.ctx.currentTime;
+      const src = this.ctx.createBufferSource();
+      src.buffer = this._noiseBuf;
+      const f = this.ctx.createBiquadFilter();
+      f.type = "lowpass";
+      f.frequency.value = filterFreq;
+      const g = this.ctx.createGain();
+      g.gain.setValueAtTime(gain, t);
       g.gain.exponentialRampToValueAtTime(0.001, t + dur);
-      src.connect(f);
-      f.connect(g);
-      g.connect(audio.master);
+      src.connect(f).connect(g).connect(this.master);
       src.start(t);
-      src.stop(t + dur);
-    } catch (e) { /* keep playing */ }
-  };
+      src.stop(t + dur + 0.02);
+    } catch (err) {}
+  }
 
-  audio.crash = function crash() {
-    audio.burst(0.3, 500, 0.5);
-    audio.blip(70, 0.25, 'sine', 0.3, 0);
-  };
+  // Tembakan: noise pendek + dentum rendah.
+  gunshot() {
+    if (!this.ctx) return;
+    this._noise(0.12, 2400, 0.5);
+    this._blip(160, 0.09, "square", 0.2);
+  }
 
-  audio.shot = function shot() {
-    audio.burst(0.09, 2800, 0.35);
-    audio.blip(180, 0.08, 'square', 0.12, 0);
-  };
+  // Tabrakan: noise rendah + sine jatuh 110 -> 45 Hz.
+  impact(strength) {
+    if (!this.ctx) return;
+    const s = Math.min(1, (strength || 8) / 20);
+    this._noise(0.18, 700, 0.25 + s * 0.35);
+    try {
+      const t = this.ctx.currentTime;
+      const o = this.ctx.createOscillator();
+      o.type = "sine";
+      o.frequency.setValueAtTime(110, t);
+      o.frequency.exponentialRampToValueAtTime(45, t + 0.18);
+      const g = this.ctx.createGain();
+      g.gain.setValueAtTime(0.3 + s * 0.25, t);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 0.2);
+      o.connect(g).connect(this.master);
+      o.start(t);
+      o.stop(t + 0.22);
+    } catch (err) {}
+  }
 
-  // Two-note chime for a finished job.
-  audio.pickup = function pickup() {
-    audio.blip(660, 0.12, 'sine', 0.18, 0);
-    audio.blip(990, 0.2, 'sine', 0.18, 0.12);
-  };
+  // Uang masuk: dua blip naik (880 -> 1320).
+  cash() {
+    if (!this.ctx) return;
+    this._blip(880, 0.09, "sine", 0.25);
+    setTimeout(() => this._blip(1320, 0.12, "sine", 0.25), 90);
+  }
 
-  // Descending sting for BUSTED.
-  audio.busted = function busted() {
-    audio.blip(392, 0.22, 'triangle', 0.2, 0);
-    audio.blip(311, 0.22, 'triangle', 0.2, 0.2);
-    audio.blip(233, 0.4, 'triangle', 0.2, 0.4);
-  };
+  // Misi selesai: arpeggio 3 nada (523 / 659 / 784).
+  missionDone() {
+    if (!this.ctx) return;
+    [523, 659, 784].forEach((f, i) => {
+      setTimeout(() => this._blip(f, 0.22, "sine", 0.28), i * 110);
+    });
+  }
 
-  audio.setMuted = function setMuted(m) {
-    audio.muted = !!m;
-    if (audio.master) audio.master.gain.value = audio.muted ? 0 : 0.5;
-  };
-
-  // Per-frame: engine pitch from speed, siren while wanted, bass loop.
-  audio.tick = function tick(state, dt) {
-    if (!audio.ctx || audio.ctx.state !== 'running') return;
-    const p = state.player;
-    const speed = Math.abs(p.speed || 0);
-    if (audio.engineOsc && audio.engineGain) {
-      audio.engineOsc.frequency.value = 55 + speed * 3.2;
-      const target = p.onFoot ? 0 : Math.min(0.09, 0.02 + speed * 0.002);
-      audio.engineGain.gain.value += (target - audio.engineGain.gain.value) * Math.min(1, dt * 6);
-    }
-    if (audio.sirenOsc && audio.sirenGain) {
-      const want = state.stars > 0;
-      const target = want ? 0.045 : 0;
-      audio.sirenGain.gain.value += (target - audio.sirenGain.gain.value) * Math.min(1, dt * 4);
-      if (want) {
-        audio.sirenT += dt;
-        if (audio.sirenT > 0.42) {
-          audio.sirenT = 0;
-          audio.sirenHigh = !audio.sirenHigh;
-          audio.sirenOsc.frequency.value = audio.sirenHigh ? 950 : 700;
-        }
-      }
-    }
-    // Bass loop: a slow minor walk, one note per beat, very quiet.
-    if (state.mode === 'playing') {
-      audio.musicT += dt;
-      if (audio.musicT > 0.34) {
-        audio.musicT = 0;
-        const scale = [110, 110, 130.8, 98, 110, 146.8, 130.8, 98];
-        const f = scale[audio.musicStep % scale.length];
-        audio.musicStep++;
-        audio.blip(f, 0.3, 'triangle', 0.05, 0);
-      }
-    }
-  };
-
-  return audio;
+  // BUSTED / DEAD: nada turun.
+  busted() {
+    if (!this.ctx) return;
+    try {
+      const t = this.ctx.currentTime;
+      const o = this.ctx.createOscillator();
+      o.type = "sawtooth";
+      o.frequency.setValueAtTime(380, t);
+      o.frequency.exponentialRampToValueAtTime(140, t + 0.6);
+      const g = this.ctx.createGain();
+      g.gain.setValueAtTime(0.25, t);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 0.65);
+      o.connect(g).connect(this.master);
+      o.start(t);
+      o.stop(t + 0.7);
+    } catch (err) {}
+  }
 }

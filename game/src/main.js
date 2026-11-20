@@ -1,289 +1,858 @@
-'use strict';
-// Tallow Point — boot + main loop (R4-2, fresh from the R4 spec).
-// Builds the city, the game state and the HUD, wires the menu, stages the
-// four screenshot presets, and runs one requestAnimationFrame loop that
-// updates gameplay and renders. The foundation inline loop is gone — this
-// file owns the loop now.
+// Tallow Point — main.js (browser entry, R5-3)
+// Gameplay inti R5-2 + polisi & misi R5-3: wanted 1-5, cruiser + roadblock +
+// helikopter, BUSTED/DEAD + respawn, 5 misi cerita, combat, save, audio, juice.
+// Fondasi R5-1: kota 7x7, kamera chase third-person, lighting golden-hour.
 
-(function boot() {
-  const params = new URLSearchParams(location.search);
-  const shot = params.get('shot') || '';
-  const seed = Number(params.get('seed') || CFG.seed) || CFG.seed;
+import * as THREE from "three";
+import { GAME, PLAYER, CLOCK, START, CARJACK, POLICE, SAVE, STAGING, CAMERA } from "./config.js";
+import { makeRng } from "./random.js";
+import { resolveCircleVsBuildings, clampToCity, turnToward } from "./physics.js";
+import {
+  generateCity,
+  buildCityMeshes,
+  centerLoopWaypoints,
+  districtAt,
+  roadLine,
+  blockCenter,
+} from "./city.js";
+import { ChaseCamera } from "./camera.js";
+import { createRenderer, createScene, followSunTarget } from "./render.js";
+import { Input } from "./input.js";
+import { Player } from "./player.js";
+import { VehicleManager } from "./vehicles.js";
+import { PedManager } from "./peds.js";
+import { HUD } from "./hud.js";
+import { Wanted, PoliceManager } from "./police.js";
+import { MissionManager } from "./missions.js";
+import { Combat } from "./combat.js";
+import { AudioSys } from "./audio.js";
+import { SaveManager } from "./save.js";
+import { Effects } from "./effects.js";
 
-  const city = buildCity(seed);
-  const canvas = document.getElementById('game');
-  const renderer = createRenderer(canvas);
-  const camera = createCamera();
-  const world = buildCityScene(city);
+const canvas = document.querySelector("#game");
+const loading = document.querySelector("#loading");
 
-  const state = newGame(city);
-  const input = createInput();
-  const hud = createHud(city);
+// ---- Menu awal (R5-4) -------------------------------------------------------
+// Panel judul + MULAI + kontrol. Game JALAN di belakang menu (auto-drive +
+// wanted 2) supaya begitu MULAI ditekan, frame pertama langsung beraksi.
+const menuEl = document.querySelector("#menu");
+const startBtn = document.querySelector("#start-btn");
+let menuOpen = true;
+function hideMenu() {
+  if (!menuOpen) return;
+  menuOpen = false;
+  if (menuEl) menuEl.classList.add("hidden");
+}
+if (startBtn) startBtn.addEventListener("click", hideMenu);
+window.addEventListener("keydown", (e) => {
+  if (menuOpen && e.code === "Enter") hideMenu();
+});
 
-  // R4-3 subsystems: police, story, combat, audio, save. They live on the
-  // state object so the update loop finds them without a signature change.
-  const police = createPolice(state, world.scene);
-  const story = createStory(state, world.scene);
-  const combat = createCombat(state, world.scene);
-  const audio = createAudio();
-  const save = createSave(state, story);
-  state.police = police;
-  state.story = story;
-  state.combat = combat;
-  state.audio = audio;
-  state.save = save;
+let renderer;
+try {
+  renderer = createRenderer(canvas);
+} catch (err) {
+  loading.textContent = "WebGL tidak tersedia di browser ini: " + err.message;
+  throw err;
+}
 
-  // Audio wakes on the first real gesture (browsers block autoplay).
-  const wakeAudio = () => audio.init();
-  window.addEventListener('keydown', wakeAudio);
-  window.addEventListener('mousedown', wakeAudio);
+const { scene, sun } = createScene();
+const camera = new THREE.PerspectiveCamera(
+  62,
+  window.innerWidth / window.innerHeight,
+  0.1,
+  1200
+);
+scene.add(camera);
 
-  // Every entity mesh goes into the city scene once, at boot. The loop
-  // only moves them; it never adds or removes meshes.
-  world.scene.add(state.player.mesh);
-  for (const car of state.parkedCars) world.scene.add(car.mesh);
-  for (const car of state.traffic) world.scene.add(car.mesh);
-  for (const ped of state.pedestrians) world.scene.add(ped.mesh);
+// ---- Kota ------------------------------------------------------------------
+const city = generateCity(GAME.seed);
+const { group: cityGroup, buildingBoxes, parkingCars } = buildCityMeshes(city, THREE);
+scene.add(cityGroup);
 
-  // ---- screenshot presets: staged scenes, hour pinned -------------------
-  // Road 3 (x = -24) crossing road 4 (z = 24) is the stage: a straight
-  // north-south road where the player, a parked car and traffic all read.
-  const STAGE_ROAD = 3;
-  const STAGE_Z = 24;
+// ---- Input + HUD + efek + audio --------------------------------------------
+const input = new Input(canvas);
+const hud = new HUD();
+const effects = new Effects(scene);
+const audio = new AudioSys();
 
-  function roadNode(roadI, z, ahead) {
-    const jBelow = Math.max(0, Math.min(
-      city.grid,
-      Math.floor((z + city.half - city.road / 2) / city.pitch),
-    ));
-    const jAbove = Math.min(city.grid, jBelow + 1);
-    return ahead ? city.nodeId(roadI, jAbove) : city.nodeId(roadI, jBelow);
+// ---- Kendaraan ---------------------------------------------------------------
+// Start di jalan utama sebelah safehouse (Crater Row), langsung mengemudi
+// supaya frame pertama sudah beraksi: mobil jalan, kamera chase di belakang.
+const waypoints = centerLoopWaypoints(city);
+const start = waypoints[3]; // simpang (-23, 23), di jalan vertikal x = -23.
+const vehicles = new VehicleManager(scene, city, buildingBoxes, makeRng(GAME.seed + 555));
+const playerCar = vehicles.spawnPlayerCar(start.x, start.z, Math.PI);
+vehicles.wrapParked(parkingCars);
+vehicles.spawnTraffic(10);
+
+// Mobil yang pernah dikemudikan pemain (= "mobil sendiri"): masuk lagi ke
+// mobil ini BUKAN carjacking — tanpa toast, tanpa trauma, tanpa objektif.
+const drivenCars = new Set([playerCar.mesh.uuid]);
+
+// ---- Pemain jalan kaki -------------------------------------------------------
+const player = new Player(THREE);
+scene.add(player.mesh);
+player.mesh.visible = false; // mulai di dalam mobil.
+
+// ---- Pejalan kaki ------------------------------------------------------------
+const peds = new PedManager(scene, city, makeRng(GAME.seed + 999));
+peds.spawn(16);
+
+// ---- Kamera ------------------------------------------------------------------
+const chase = new ChaseCamera(camera, buildingBoxes);
+chase.snapTo(playerCar.pos, playerCar.heading);
+
+// ---- Auto-drive (R5-4) -------------------------------------------------------
+// Mobil jalan sendiri mengikuti loop tengah sampai pemain pegang kendali
+// (gas/belok/rem). Dipakai staging pembuka + screenshot: frame pertama
+// langsung bergerak, bukan mobil diam.
+const driveWaypoints = centerLoopWaypoints(city); // (3,3)->(4,3)->(4,4)->(3,4).
+let autoDrive = true;
+let autoDriveIdx = 0; // start di (3,4) menghadap -Z, target pertama (3,3).
+function updateAutoDrive(dt, car) {
+  const wp = driveWaypoints[autoDriveIdx];
+  const dx = wp.x - car.pos.x;
+  const dz = wp.z - car.pos.z;
+  if (Math.hypot(dx, dz) < 6) {
+    autoDriveIdx = (autoDriveIdx + 1) % driveWaypoints.length;
+    return;
   }
+  const desired = Math.atan2(dx, dz);
+  car.heading = turnToward(car.heading, desired, 2.2 * dt);
+  car.mesh.rotation.y = car.heading;
+  const target = STAGING.autoDriveSpeed;
+  car.speed += Math.max(-8 * dt, Math.min(8 * dt, target - car.speed));
+  car.pos.x += Math.sin(car.heading) * car.speed * dt;
+  car.pos.z += Math.cos(car.heading) * car.speed * dt;
+  const hit = resolveCircleVsBuildings(car.pos, 1.9, buildingBoxes);
+  if (hit) car.speed *= 0.4;
+  clampToCity(car.pos, 4);
+}
 
-  // Put the first few traffic cars on one road, heading south, spaced out.
-  function stageTrafficOnRoad(zList) {
-    const roadX = city.roadAt(STAGE_ROAD);
-    for (let i = 0; i < zList.length && i < state.traffic.length; i++) {
-      const car = state.traffic[i];
-      car.x = roadX;
-      car.z = zList[i];
-      car.heading = 0;
-      car.node = roadNode(STAGE_ROAD, car.z, false);
-      car.target = roadNode(STAGE_ROAD, car.z, true);
-      car.speed = car.cruise;
+// ---- Wanted + polisi ---------------------------------------------------------
+const wanted = new Wanted();
+const police = new PoliceManager(scene, city, buildingBoxes, makeRng(GAME.seed + 3131), {
+  onImpact: (speed) => {
+    chase.addTrauma(Math.min(0.5, speed / 30));
+    audio.impact(speed);
+  },
+  onPlayerDamage: (amount, source) => damagePlayer(amount, source),
+  onBusted: (reason) => doBusted(reason),
+  onHeat: (n) => wanted.addHeat(n),
+  effects,
+});
+
+// ---- State game --------------------------------------------------------------
+const state = {
+  mode: "driving", // "driving" | "onFoot"
+  cash: START.cash,
+  life: START.life,
+  armor: START.armor,
+  clockMinutes: CLOCK.startMinutes,
+  district: "Crater Row",
+  objective: "Kenali Crater Row — curi sebuah mobil (E)",
+  missionTitle: "KENALI CRATER ROW",
+  objectiveDone: false,
+  missionTimer: null,
+  objectiveX: city.safehouse ? city.safehouse.x : 0,
+  objectiveZ: city.safehouse ? city.safehouse.z : 0,
+  policeText: "",
+  policeUnits: [],
+  overlay: null, // null | "BUSTED" | "DEAD"
+  frames: 0,
+  fps: 0,
+  speedKmh: 0,
+  saveTimer: 0,
+};
+
+// Posisi pemain saat ini (mobil atau jalan kaki).
+function playerPos() {
+  const car = vehicles.playerCar;
+  if (state.mode === "driving" && car) return { x: car.pos.x, z: car.pos.z };
+  return { x: player.pos.x, z: player.pos.z };
+}
+
+function districtNameAt(x, z) {
+  const bx = Math.max(
+    0,
+    Math.min(
+      GAME.grid - 1,
+      Math.floor((x + GAME.halfCity - GAME.roadWidth) / GAME.roadPitch)
+    )
+  );
+  const bz = Math.max(
+    0,
+    Math.min(
+      GAME.grid - 1,
+      Math.floor((z + GAME.halfCity - GAME.roadWidth) / GAME.roadPitch)
+    )
+  );
+  return districtAt(bx, bz).name;
+}
+
+// ---- Save / load -------------------------------------------------------------
+function saveGame() {
+  const p = playerPos();
+  SaveManager.save({
+    cash: state.cash,
+    life: state.life,
+    armor: state.armor,
+    missionIndex: missions.index,
+    playerX: p.x,
+    playerZ: p.z,
+    clockMinutes: state.clockMinutes,
+  });
+}
+
+// ---- Misi --------------------------------------------------------------------
+const missions = new MissionManager(scene, city, vehicles, peds, makeRng(GAME.seed + 777), {
+  onComplete: (def, reward) => {
+    state.cash += reward;
+    if (def.id === "chauffeur") {
+      state.armor = Math.min(100, state.armor + 50); // misi 5: +50 armor.
+    }
+    const p = playerPos();
+    effects.goldBurst(p.x, 1.2, p.z);
+    audio.missionDone();
+    hud.showToast(reward > 0 ? `Misi selesai! +$${reward}` : "Misi selesai!");
+    saveGame();
+  },
+  onFail: (def, reason) => {
+    hud.showToast(`Misi gagal: ${reason} — coba lagi`);
+  },
+  onStartWanted: (stars) => wanted.setStars(stars),
+  onClearWanted: () => wanted.clear(),
+  onPickup: () => hud.showToast("Penumpang naik! Antar ke safehouse"),
+  onAllDone: (bonus) => {
+    state.cash += bonus;
+    hud.showToast(`Semua misi selesai! Bonus +$${bonus}`);
+    audio.missionDone();
+    saveGame();
+  },
+});
+
+// ---- Combat ------------------------------------------------------------------
+const combat = new Combat(scene, camera, {
+  audio,
+  effects,
+  damageUnit: (ref, dmg) => police.damageUnit(ref, dmg),
+  onHit: () => wanted.addHeat(POLICE.heatShoot),
+  onKill: (ref, result) => {
+    wanted.addHeat(POLICE.heatShoot + POLICE.heatKill);
+    hud.showToast(result === "killed" ? "Polisi dilumpuhkan!" : "Cruiser dilumpuhkan!");
+    chase.addTrauma(0.4);
+    hitStop(0.06);
+  },
+  onShot: () => chase.addTrauma(0.12),
+});
+
+// ---- Load save (kecuali ?fresh=1 untuk smoke test) ---------------------------
+const fresh = location.search.includes("fresh=1");
+const saved = fresh ? null : SaveManager.load();
+let startMissionIndex = 0;
+if (saved) {
+  state.cash = saved.cash;
+  state.life = saved.life;
+  state.armor = saved.armor;
+  state.clockMinutes = saved.clockMinutes;
+  startMissionIndex = Math.max(0, Math.min(5, saved.missionIndex || 0)); // 5 = semua misi selesai (valid).
+  // Lanjut jalan kaki di posisi tersimpan; mobil di-spawn ulang di safehouse.
+  state.mode = "onFoot";
+  player.place(saved.playerX, saved.playerZ, Math.PI);
+  player.mesh.visible = true;
+  const drop = { x: roadLine(3), z: blockCenter(4) };
+  playerCar.pos.set(drop.x + 4, 0, drop.z);
+  playerCar.heading = Math.PI;
+  playerCar.mesh.rotation.y = Math.PI;
+  playerCar.speed = 0;
+  chase.snapTo(player.pos, player.heading);
+  hud.showToast("Save dimuat — lanjutkan permainan");
+}
+missions.start(startMissionIndex);
+
+// R5-4 staging pembuka (spec C): game baru = pemain sudah di coupe merah,
+// di jalan utama, wanted 2 bintang aktif, cruiser mengejar. Bukan kota
+// kosong, bukan menu kosong. (Save lama tidak di-staging — lanjutkan.)
+if (!saved) {
+  wanted.setStars(STAGING.openingWanted);
+}
+
+// ---- Kerusakan pemain / BUSTED / DEAD / respawn ------------------------------
+let dmgAccum = 0;
+function damagePlayer(amount, source) {
+  if (state.overlay || amount <= 0) return;
+  let remaining = amount;
+  // Armor menyerap 60% damage lebih dulu.
+  if (state.armor > 0) {
+    const absorbed = Math.min(state.armor, remaining * 0.6);
+    state.armor -= absorbed;
+    remaining -= absorbed;
+  }
+  if (remaining > 0) {
+    state.life -= remaining;
+    dmgAccum += remaining;
+    if (dmgAccum > 6) {
+      dmgAccum = 0;
+      hud.damageFlash(0.3);
     }
   }
-
-  // Player on foot on the road, a parked car at the kerb beside them.
-  function stageOnFoot() {
-    const roadX = city.roadAt(STAGE_ROAD);
-    state.player.x = roadX;
-    state.player.z = STAGE_Z;
-    state.player.heading = 0;
-    state.player.onFoot = true;
-    const kerb = state.parkedCars[0];
-    kerb.x = roadX + 4.6;
-    kerb.z = STAGE_Z + 6;
-    kerb.heading = 0;
-    kerb.kind = 'parked';
-    kerb.taken = false;
-    stageTrafficOnRoad([STAGE_Z + 30, STAGE_Z + 60, STAGE_Z - 30]);
+  if (state.life <= 0) {
+    state.life = 0;
+    doDead();
   }
+}
 
-  // Player behind the wheel: park a car on the road, walk up, steal it.
-  function stageDriving() {
-    const roadX = city.roadAt(STAGE_ROAD);
-    const kerb = state.parkedCars[0];
-    kerb.x = roadX;
-    kerb.z = STAGE_Z + 2;
-    kerb.heading = 0;
-    kerb.kind = 'parked';
-    kerb.taken = false;
-    state.player.x = roadX + 2;
-    state.player.z = STAGE_Z + 2;
-    state.player.heading = 0;
-    state.player.onFoot = true;
-    stealCar(state);
-    stageTrafficOnRoad([STAGE_Z + 32, STAGE_Z + 62, STAGE_Z - 28]);
+function applyCashLoss() {
+  const loss = Math.floor(state.cash * POLICE.bustedCashLoss);
+  state.cash -= loss;
+  return loss;
+}
+
+function doBusted(reason) {
+  if (state.overlay) return;
+  state.overlay = "BUSTED";
+  const loss = applyCashLoss();
+  // Toast selalu "BUSTED!" — `reason` internal ("debug" dari hook test,
+  // "surrounded" dari polisi) jangan bocor ke layar pemain.
+  hud.showToast(`BUSTED! -$${loss}`);
+  hud.setOverlay("BUSTED");
+  audio.busted();
+  wanted.clear();
+  police.clearAll();
+  saveGame();
+}
+
+function doDead() {
+  if (state.overlay) return;
+  state.overlay = "DEAD";
+  const loss = applyCashLoss();
+  hud.showToast(`WASTED! -$${loss}`);
+  hud.setOverlay("DEAD");
+  audio.busted();
+  wanted.clear();
+  police.clearAll();
+  saveGame();
+}
+
+function respawn() {
+  if (!state.overlay) return;
+  state.overlay = null;
+  hud.setOverlay(null);
+  state.life = START.life;
+  wanted.clear();
+  police.clearAll();
+  // Pemain jalan kaki di jalan dekat safehouse Crater Row.
+  const drop = { x: roadLine(3), z: blockCenter(4) };
+  player.place(drop.x, drop.z, Math.PI);
+  player.mesh.visible = true;
+  state.mode = "onFoot";
+  // Mobil pemain dipindah ke dekat safehouse (jadi mobil parkir milik sendiri).
+  const car = vehicles.playerCar;
+  if (car) {
+    car.pos.set(drop.x + 4, 0, drop.z);
+    car.heading = Math.PI;
+    car.mesh.rotation.y = Math.PI;
+    car.speed = 0;
+    vehicles.abandon(car);
   }
+  chase.snapTo(player.pos, player.heading);
+  missions.restart();
+  saveGame();
+  hud.showToast("Kembali ke Crater Row");
+}
 
-  const presets = {
-    start: { hour: 10, mode: 'orbit', az: -0.6, el: 0.62, radius: 300 },
-    city: { hour: 13, mode: 'street', stage: stageOnFoot },
-    chase: { hour: 18, mode: 'street', stage: stageDriving },
-    police: { hour: 22, mode: 'street', stage: stageDriving, stars: 3 },
+// ---- Carjacking --------------------------------------------------------------
+// E saat mengemudi: keluar mobil (hanya kalau mobil hampir berhenti).
+// E saat jalan kaki: curi mobil terdekat dalam radius CARJACK.
+let crashHeatCooldown = 0;
+function addCrashHeat() {
+  if (crashHeatCooldown > 0) return;
+  crashHeatCooldown = POLICE.heatCrashCooldown;
+  wanted.addHeat(POLICE.heatCrash);
+}
+
+vehicles.onImpact = (speed) => {
+  chase.addTrauma(Math.min(0.5, speed / 30));
+  audio.impact(speed);
+  addCrashHeat();
+};
+
+function handleInteract() {
+  if (state.mode === "driving") {
+    const car = vehicles.playerCar;
+    if (!car) return;
+    if (Math.abs(car.speed) > 3) {
+      hud.showToast("Terlalu cepat untuk keluar!");
+      return;
+    }
+    // Keluar di sisi kiri mobil.
+    const lx = Math.cos(car.heading);
+    const lz = -Math.sin(car.heading);
+    player.place(
+      car.pos.x + lx * CARJACK.exitOffset,
+      car.pos.z + lz * CARJACK.exitOffset,
+      car.heading
+    );
+    player.mesh.visible = true;
+    vehicles.abandon(car);
+    state.mode = "onFoot";
+    return;
+  }
+  // Jalan kaki: cari mobil terdekat yang bisa dicuri.
+  const found = vehicles.nearestStealable(player.pos.x, player.pos.z, CARJACK.radius, null);
+  if (!found) {
+    hud.showToast("Tidak ada mobil di dekatmu");
+    return;
+  }
+  const car = found.vehicle;
+  const isOwn = drivenCars.has(car.mesh.uuid);
+  const hadDriver = vehicles.steal(car);
+  drivenCars.add(car.mesh.uuid);
+  if (hadDriver) {
+    // Pengemudi kabur menjauhi pemain.
+    const away = Math.atan2(car.pos.x - player.pos.x, car.pos.z - player.pos.z);
+    peds.spawnFleeing(car.pos.x, car.pos.z, away);
+  }
+  player.mesh.visible = false;
+  input.orbitYaw = 0;
+  state.mode = "driving";
+  chase.snapTo(car.pos, car.heading);
+  if (isOwn) {
+    // Kembali ke mobil sendiri: diam-diam, bukan curian.
+    return;
+  }
+  // Curian sungguhan — juice (game-feel): trauma kecil + hit-stop singkat
+  // supaya curian terasa, plus toast. Wanted naik, tapi ganti mobil bikin
+  // polisi kehilangan jejak sebentar (decay lebih cepat).
+  chase.addTrauma(0.3);
+  hitStop(0.06);
+  audio.impact(4);
+  wanted.addHeat(POLICE.heatCarjack);
+  wanted.freshCar();
+  missions.notifyCarjack(car);
+  hud.showToast(hadDriver ? "Mobil dicuri! Pengemudi kabur!" : "Mobil dicuri!");
+}
+
+// Tembak dengan klik mouse (jalan kaki): pointerup tanpa drag berarti klik.
+let pointerDownPos = null;
+canvas.addEventListener("pointerdown", (e) => {
+  pointerDownPos = { x: e.clientX, y: e.clientY };
+});
+canvas.addEventListener("pointerup", (e) => {
+  if (!pointerDownPos) return;
+  const moved = Math.hypot(e.clientX - pointerDownPos.x, e.clientY - pointerDownPos.y);
+  pointerDownPos = null;
+  if (moved > 6) return; // drag kamera, bukan klik tembak.
+  if (state.mode !== "onFoot" || state.overlay) return;
+  const ndcX = (e.clientX / window.innerWidth) * 2 - 1;
+  const ndcY = -(e.clientY / window.innerHeight) * 2 + 1;
+  combat.shootFromScreen(ndcX, ndcY, police.shootables());
+});
+
+// Hit-stop (game-feel): perlambat waktu sebentar, pakai waktu nyata supaya
+// tidak pernah macet. Hanya pemanggil terbaru yang memulihkan.
+let hitStopTimer = 0;
+let hitStopId = 0;
+let timeScale = 1;
+function hitStop(duration) {
+  const id = ++hitStopId;
+  timeScale = 0.1;
+  hitStopTimer = duration;
+  setTimeout(() => {
+    if (id === hitStopId) {
+      timeScale = 1;
+      hitStopTimer = 0;
+    }
+  }, duration * 1000);
+}
+
+// ---- Loop --------------------------------------------------------------------
+const timer = new THREE.Timer();
+timer.connect(document);
+let fpsAccum = 0;
+let fpsFrames = 0;
+let fpsTime = 0;
+
+function updateHudState() {
+  const car = vehicles.playerCar;
+  const p = playerPos();
+  const heading = state.mode === "driving" && car ? car.heading : player.heading;
+  state.speedKmh = state.mode === "driving" && car ? Math.abs(car.speed) * 3.6 : 0;
+  state.district = districtNameAt(p.x, p.z);
+  const pc = police.activeCount;
+  const parts = [];
+  if (pc.cruisers) parts.push(`CRUISER ×${pc.cruisers}`);
+  if (pc.roadblock) parts.push(`ROADBLOCK ×${pc.roadblock}`);
+  if (pc.cops) parts.push(`POLISI ×${pc.cops}`);
+  if (pc.heli) parts.push("HELI ×1");
+  state.policeText = parts.length ? "POLISI: " + parts.join(" · ") : "";
+  state.policeUnits = police.units;
+  return {
+    wanted: wanted.stars,
+    cash: state.cash,
+    clockMinutes: state.clockMinutes,
+    district: state.district,
+    life: state.life,
+    armor: state.armor,
+    speedKmh: state.speedKmh,
+    driving: state.mode === "driving",
+    objective: state.objective,
+    objectiveDone: state.objectiveDone,
+    missionTitle: state.missionTitle,
+    missionTimer: state.missionTimer,
+    policeText: state.policeText,
+    policeUnits: state.policeUnits,
+    playerX: p.x,
+    playerZ: p.z,
+    playerHeading: heading,
+    vehicles: vehicles.list,
+    objectiveX: state.objectiveX,
+    objectiveZ: state.objectiveZ,
+    fps: state.fps,
   };
-  const preset = presets[shot] || null;
-  if (preset) {
-    state.hour = preset.hour;
-    if (preset.stage) preset.stage();
-    if (preset.stars) addHeat(state, CFG.wanted.starAt[preset.stars]);
-    state.mode = 'playing';
-    if (shot === 'police') stageChase(state, police);
+}
+
+renderer.setAnimationLoop(() => {
+  timer.update();
+  const rawDt = Math.min(Math.max(timer.getDelta(), 0), 0.1);
+  const dt = rawDt * timeScale;
+
+  // Hitung frame + fps DI SINI (sebelum cabang overlay) supaya counter
+  // tetap jalan saat BUSTED/DEAD — kalau tidak, wait_for_function yang
+  // menunggu frame berikutnya tidak pernah terpenuhi saat overlay aktif.
+  state.frames++;
+  fpsAccum += rawDt;
+  fpsFrames++;
+  fpsTime += rawDt;
+  if (fpsTime >= 0.5) {
+    state.fps = Math.round(fpsFrames / fpsAccum);
+    fpsAccum = 0;
+    fpsFrames = 0;
+    fpsTime = 0;
   }
 
-  // ---- menu ---------------------------------------------------------------
-  function startLife(clear) {
-    if (clear) {
-      save.wipe();
-      resetGame(state);
-      resetStory(story);
-      resetPolice(police);
-    } else {
-      save.load();
-      state.mode = 'playing';
+  // Mute (M) selalu bisa; respawn (R) hanya saat overlay BUSTED/DEAD.
+  if (input.pressed("KeyM")) {
+    audio.setMuted(!audio.muted);
+    hud.showToast(audio.muted ? "Suara: mati" : "Suara: nyala");
+  }
+  if (state.overlay) {
+    if (input.pressed("KeyR")) respawn();
+    hud.update(dt, updateHudState());
+    renderer.render(scene, camera);
+    input.endFrame();
+    return;
+  }
+
+  // Jam game terus berjalan (golden-hour tetap, siklus siang/malam di R5-4).
+  state.clockMinutes += CLOCK.minutesPerSecond * dt;
+  if (crashHeatCooldown > 0) crashHeatCooldown -= dt;
+
+  // Interaksi (E) — edge-triggered, sekali per penekanan.
+  if (input.interact) handleInteract();
+  // Tembak auto-aim (F) saat jalan kaki.
+  if (input.pressed("KeyF") && state.mode === "onFoot") {
+    combat.shootAutoAim(police.shootables());
+  }
+
+  // Update pemain / mobil.
+  if (state.mode === "driving") {
+    const car = vehicles.playerCar;
+    if (car) {
+      if (autoDrive) {
+        // Input apa pun mematikan auto-drive — kendali penuh ke pemain.
+        if (input.throttle || input.brake || input.steerLeft || input.steerRight) {
+          autoDrive = false;
+        }
+      }
+      if (autoDrive) {
+        vehicles.update(dt, input, false); // lalu lintas + tabrakan tetap jalan.
+        updateAutoDrive(dt, car);
+      } else {
+        vehicles.update(dt, input, true);
+      }
+      chase.update(dt, car.pos, car.heading, Math.abs(car.speed), "driving");
+      followSunTarget(sun, car.pos);
     }
-    menu.hide();
+  } else {
+    const move = input.moveVector();
+    player.update(dt, move, chase.yaw, buildingBoxes, vehicles.carCircles(null));
+    vehicles.update(dt, input, false);
+    const camHeading = player.heading + input.orbitYaw;
+    chase.update(dt, player.pos, camHeading, player.speed, "onFoot");
+    followSunTarget(sun, player.pos);
   }
-  const menu = createMenu(state, { onStart: startLife });
-  menu.setMissions(menuNames(story));
-  if (preset) menu.hide();
 
-  // Autosave while playing; the menu buttons own the rest of the flow.
-  setInterval(() => { if (state.mode === 'playing') save.save(); }, 10000);
-  window.addEventListener('pagehide', () => save.save());
+  // Pejalan kaki (menghindar dari semua kendaraan yang bergerak).
+  peds.update(dt, vehicles.list);
 
-  // ---- debug hook: capture scripts and later sessions stage scenes here ---
-  window.__TALLOW_DEBUG = {
-    city, world, camera, renderer, preset: shot || null,
-    state,
-    setTimeOfDay(hour) { state.hour = hour; setTimeOfDay(world, hour); },
-    setWanted(stars) {
-      state.heat = stars > 0 ? CFG.wanted.starAt[stars] : 0;
-      state.stars = stars;
-      // Same 4-second grace addHeat() gives, or the heat decays below the
-      // star threshold before the first cruiser can even spawn.
-      state.lastCrimeAt = state.time;
-    },
-    setClock(hour) { state.hour = hour; },
-    drawMinimap() { hud.update(state); },
-    // Walk the player up to the nearest parked car (real path, for tests).
-    teleportNearCar() {
-      const car = nearestParkedCar(
-        state.parkedCars, state.player.x, state.player.z, 500,
-      );
-      if (!car) return null;
-      state.player.x = car.x + 2;
-      state.player.z = car.z + 2;
-      state.player.onFoot = true;
-      state.player.car = null;
-      return car.id;
-    },
-    // Press E through the real keyboard path, like a player would.
-    stealNow() {
-      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyE', bubbles: true }));
-    },
-    startGame() { startLife(false); },
-    // ---- R4-3 debug hooks ------------------------------------------------
-    police, story, combat, audio, save,
-    startMission(i) {
-      story.index = Math.max(0, Math.min(story.defs.length - 1, i));
-      story.active = null;
-      startMission(state, story);
-      return story.active ? story.active.def.id : null;
-    },
-    missionState() {
-      return {
-        index: story.index,
-        active: story.active ? story.active.def.id : null,
-        step: story.active ? story.active.step : -1,
-        done: story.done.slice(),
-        cash: state.cash,
-        objective: state.objective,
-      };
-    },
-    policeState() {
-      return {
-        stars: state.stars,
-        heat: Math.round(state.heat),
-        cruisers: police.cruisers.map((c) => ({
-          id: c.id,
-          x: Math.round(c.x * 10) / 10, z: Math.round(c.z * 10) / 10,
-          dist: Math.round(Math.hypot(c.x - state.player.x, c.z - state.player.z) * 10) / 10,
-          hp: c.hp, disabledT: Math.round(c.disabledT * 10) / 10,
-        })),
-        roadblocks: police.roadblocks.length,
-        heli: !!police.heliActive,
-        mode: state.mode,
-      };
-    },
-    // Put a cruiser right next to the on-foot player at 3 stars: BUSTED
-    // follows within ~1.2 game-seconds.
-    bustNow() {
-      state.heat = CFG.wanted.starAt[3];
-      state.stars = 3;
-      state.lastCrimeAt = state.time; // grace, or stars decay before the bust lands
-      if (!state.player.onFoot) exitCar(state);
-      let c = police.cruisers[0];
-      if (!c) c = spawnCruiser(state, police);
-      c.x = state.player.x + 2;
-      c.z = state.player.z + 2;
-      c.speed = 0;
-      c.mesh.group.position.set(c.x, 0, c.z);
-      // Re-anchor the chase to the node it now stands on.
-      c.node = nearestNode(city, c.x, c.z).id;
-      c.target = c.node;
-      c.path = [];
-      c.pathI = 0;
+  // Wanted: turun perlahan hanya saat bersembunyi (tidak ada polisi dekat).
+  const p = playerPos();
+  const hidden = police.nearestPoliceDist(p.x, p.z) > POLICE.hiddenRange;
+  wanted.update(dt, hidden);
+
+  // Polisi: kejar, roadblock, helikopter, tangkap, tembak.
+  const car = vehicles.playerCar;
+  police.update(dt, {
+    playerX: p.x,
+    playerZ: p.z,
+    playerHeading: state.mode === "driving" && car ? car.heading : player.heading,
+    playerSpeed: state.mode === "driving" && car ? Math.abs(car.speed) : player.speed,
+    mode: state.mode,
+    playerCar: car,
+    vehicles: vehicles.list,
+    wanted,
+    time: state.frames,
+  });
+
+  // R5-4: kamera menengadah sedikit saat helikopter aktif supaya heli masuk frame.
+  chase.setPitchUp(police.heli ? CAMERA.pitchUpHeli : 0);
+
+  // Misi cerita.
+  const mStatus = missions.update(dt, {
+    playerX: p.x,
+    playerZ: p.z,
+    mode: state.mode,
+    playerCar: car,
+    wantedStars: wanted.stars,
+  });
+  state.objective = mStatus.objective;
+  state.missionTitle = mStatus.title;
+  state.objectiveDone = mStatus.done;
+  state.missionTimer = mStatus.timer;
+  state.objectiveX = mStatus.targetX;
+  state.objectiveZ = mStatus.targetZ;
+
+  // Combat (reload, tracer, muzzle flash) + efek + audio.
+  combat.update(dt);
+  effects.update(dt);
+  audio.update(dt, {
+    speed: state.mode === "driving" && car ? Math.abs(car.speed) : 0,
+    driving: state.mode === "driving",
+    siren: police.sirenOn,
+  });
+
+  // Auto-save tiap 10 detik.
+  state.saveTimer += dt;
+  if (state.saveTimer >= SAVE.autoSaveSeconds) {
+    state.saveTimer = 0;
+    saveGame();
+  }
+
+  hud.update(dt, updateHudState());
+  renderer.render(scene, camera);
+
+  input.endFrame();
+});
+
+window.addEventListener("resize", () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+if (loading) loading.remove();
+
+// Hook debug untuk verifikasi headless (Playwright) dan konsol.
+// debug.teleportPlayer dipakai HANYA oleh smoke test headless untuk menaruh
+// pemain di dekat mobil target sebelum uji carjacking (bukan cheat game).
+window.__game = {
+  renderer,
+  scene,
+  camera,
+  chase,
+  city,
+  state,
+  player,
+  vehicles,
+  peds,
+  hud,
+  input,
+  sun,
+  wanted,
+  police,
+  missions,
+  combat,
+  audio,
+  effects,
+  get playerCar() {
+    return vehicles.playerCar;
+  },
+  get car() {
+    const c = vehicles.playerCar;
+    return c ? c.mesh : null;
+  },
+  debug: {
+    teleportPlayer(x, z) {
+      if (state.mode !== "onFoot") return false;
+      player.place(x, z, player.heading);
       return true;
     },
-    dieNow() { damagePlayer(state, 9999); return state.mode; },
-    shootNow() {
-      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Space', bubbles: true }));
+    teleportCar(x, z, heading) {
+      const car = vehicles.playerCar;
+      if (!car) return false;
+      car.pos.set(x, 0, z);
+      car.heading = heading === undefined ? car.heading : heading;
+      car.mesh.rotation.y = car.heading;
+      car.speed = 0;
+      return true;
     },
-    meleeNow() {
-      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyF', bubbles: true }));
+    teleportToObjective() {
+      const car = vehicles.playerCar;
+      if (state.mode === "driving" && car) {
+        return this.teleportCar(state.objectiveX, state.objectiveZ, car.heading);
+      }
+      return this.teleportPlayer(state.objectiveX, state.objectiveZ);
     },
-    // Park a pedestrian right in front of the player for combat tests.
-    placePedAhead() {
-      const ped = state.pedestrians[0];
-      ped.x = state.player.x + Math.sin(state.player.heading) * 1.5;
-      ped.z = state.player.z + Math.cos(state.player.heading) * 1.5;
-      ped.life = 100;
-      ped.state = 'walk';
-      ped.mesh.visible = true;
-      return { x: ped.x, z: ped.z, life: ped.life };
+    setWanted(n) {
+      wanted.setStars(n);
+      return wanted.stars;
     },
-    saveNow() { return save.save(); },
-    audioState() {
-      return {
-        hasCtx: !!audio.ctx,
-        ctxState: audio.ctx ? audio.ctx.state : 'none',
+    addHeat(n) {
+      wanted.addHeat(n);
+      return wanted.stars;
+    },
+    startMission(i) {
+      missions.start(i);
+      return missions.index;
+    },
+    damagePlayer(n) {
+      damagePlayer(n, "debug");
+      return state.life;
+    },
+    setLife(n) {
+      state.life = n;
+      return state.life;
+    },
+    forceBusted() {
+      doBusted("debug");
+      return state.overlay;
+    },
+    respawn() {
+      respawn();
+      return state.overlay;
+    },
+    clearSave() {
+      SaveManager.clear();
+      return true;
+    },
+    newLife() {
+      SaveManager.clear();
+      location.reload();
+    },
+    // R5-4: tutup menu awal (dipakai capture screenshot).
+    startGame() {
+      hideMenu();
+      return true;
+    },
+    setAutoDrive(on) {
+      autoDrive = !!on;
+      return autoDrive;
+    },
+    // R5-4 staging screenshot: tempatkan adegan yang sinematik.
+    // kind: "cover" (wanted 2 + 2 cruiser flank), "chase" (wanted 3 + 2 cruiser),
+    // "police" (wanted 4 + 2 cruiser + roadblock + heli), "city" (wanted 0).
+    // Pemain selalu di coupe MERAH terang di jalan lurus x=-23 menghadap -Z.
+    stageShot(kind) {
+      hideMenu();
+      if (state.overlay) {
+        state.overlay = null;
+        hud.setOverlay(null);
+      }
+      const drop = { x: roadLine(3), z: roadLine(5) }; // (-23, 69), jalan lurus ke -Z.
+      let car = vehicles.playerCar;
+      if (!car || car.color !== PLAYER.carColor) {
+        if (car) vehicles.abandon(car);
+        car = vehicles.spawnPlayerCar(drop.x, drop.z, Math.PI);
+        drivenCars.add(car.mesh.uuid);
+      } else {
+        car.pos.set(drop.x, 0, drop.z);
+        car.heading = Math.PI;
+        car.mesh.rotation.y = Math.PI;
+        car.speed = 0;
+      }
+      if (state.mode !== "driving") {
+        player.mesh.visible = false;
+        state.mode = "driving";
+      }
+      input.orbitYaw = 0;
+      chase.snapTo(car.pos, car.heading);
+      autoDrive = true;
+      autoDriveIdx = 0; // target (3,3), lurus ke -Z dari z=69.
+      police.clearAll();
+      wanted.clear();
+      if (kind === "cover") {
+        wanted.setStars(2);
+        police.stageFlankers(car.pos.x, car.pos.z, car.heading, 2);
+      } else if (kind === "chase") {
+        wanted.setStars(3);
+        police.stageFlankers(car.pos.x, car.pos.z, car.heading, 2);
+      } else if (kind === "police") {
+        wanted.setStars(4);
+        police.stageFlankers(car.pos.x, car.pos.z, car.heading, 2);
+        police.stageRoadblock(car.pos.x, car.pos.z, car.heading);
+      }
+      return kind;
+    },
+    // R5-4: tempatkan lalu lintas di jalan yang sama di depan pemain.
+    // Mobil diletakkan 30/46/62 m di depan, searah pemain (dua pertama) dan
+    // berlawanan arah (ketiga, paling jauh supaya tidak cepat bertemu).
+    stageTraffic(count) {
+      const car = vehicles.playerCar;
+      if (!car) return 0;
+      let placed = 0;
+      for (const v of vehicles.list) {
+        if (placed >= count) break;
+        if (v.kind !== "traffic") continue;
+        const d = 30 + placed * 16;
+        const z = car.pos.z - d; // pemain menghadap -Z: depan = z mengecil.
+        const j = Math.max(0, Math.min(GAME.grid - 1, Math.floor((z - roadLine(0)) / GAME.roadPitch)));
+        const dirPlus = placed === 2; // hanya mobil ketiga yang berlawanan arah.
+        if (dirPlus) {
+          v.fromNode = city.nodeId(3, j);
+          v.toNode = city.nodeId(3, j + 1);
+          v.edgeT = (z - roadLine(j)) / GAME.roadPitch;
+        } else {
+          v.fromNode = city.nodeId(3, j + 1);
+          v.toNode = city.nodeId(3, j);
+          v.edgeT = (roadLine(j + 1) - z) / GAME.roadPitch;
+        }
+        v.pauseTimer = 0;
+        v.speed = v.cruise;
+        placed++;
+      }
+      return placed;
+    },
+    // R5-4: tempatkan pejalan kaki di trotoar blok di sisi jalan pemain.
+    stagePeds(count) {
+      return peds.stageOnBlocks(
+        [
+          { bx: 2, bz: 4 },
+          { bx: 3, bz: 4 },
+          { bx: 2, bz: 3 },
+          { bx: 3, bz: 3 },
+        ],
+        count
+      );
+    },
+    framing() {
+      const v = new THREE.Vector3();
+      const out = [];
+      const proj = (x, y, z, kind) => {
+        v.set(x, y, z).project(camera);
+        out.push({ kind, x: +v.x.toFixed(2), y: +v.y.toFixed(2), z: +v.z.toFixed(2) });
       };
+      for (const u of police.units) {
+        // Heli diproyeksikan di ketinggian terbangnya, bukan di tanah.
+        proj(u.x, u.kind === "heli" ? POLICE.heliHeight : 1.2, u.z, u.kind);
+      }
+      const car = vehicles.playerCar;
+      if (car) proj(car.pos.x, 1.2, car.pos.z, "player");
+      for (const t of vehicles.list) {
+        if (t.kind === "traffic") proj(t.pos.x, 1.0, t.pos.z, "traffic");
+      }
+      return out;
     },
-  };
-
-  // ---- main loop -----------------------------------------------------------
-  let last = performance.now();
-  let orbitAz = -0.6;
-  let lastHourPainted = -1;
-  function frame(now) {
-    const dt = Math.min(0.05, (now - last) / 1000);
-    last = now;
-    updateGame(state, input, dt);
-    if (preset) state.hour = preset.hour; // staged hour stays pinned
-    // The story refreshes the menu list whenever a job completes/fails.
-    if (story.dirty) {
-      menu.setMissions(menuNames(story));
-      story.dirty = false;
-    }
-    if (Math.abs(state.hour - lastHourPainted) > 0.02) {
-      setTimeOfDay(world, state.hour);
-      lastHourPainted = state.hour;
-    }
-    if (preset && preset.mode === 'orbit') {
-      // Cover shot: fixed high orbit over the whole city.
-      updateOrbitCamera(camera, { x: 0, z: 0 }, preset.az, preset.el, preset.radius);
-    } else if (state.mode === 'menu' && !preset) {
-      orbitAz += dt * 0.05;
-      updateOrbitCamera(camera, { x: 0, z: 0 }, orbitAz, 0.55, 300);
-    } else {
-      updateChaseCamera(camera, state.player, dt);
-      clampCamera(camera, city.half);
-    }
-    hud.update(state);
-    renderer.render(world.scene, camera);
-    requestAnimationFrame(frame);
-  }
-  requestAnimationFrame(frame);
-})();
+  },
+};

@@ -1,82 +1,190 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="id">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="icon" href="data:,">
-<title>Tallow Point — open-world crime</title>
+<title>Tallow Point — GTA VI (make.fun gta6-01)</title>
 <style>
-  html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden;
-    background: #0b1026; font-family: 'Segoe UI', system-ui, sans-serif; }
-  #game { position: fixed; inset: 0; display: block; }
-  .hud { position: fixed; z-index: 5; color: #fff; text-shadow: 0 1px 3px #000;
-    pointer-events: none; user-select: none; }
-  #hud-topleft { top: 14px; left: 16px; font-size: 20px; line-height: 1.35; }
-  #hud-topleft .cash { color: #7dff8a; font-weight: 700; font-size: 26px; }
-  .bar { width: 180px; height: 12px; background: rgba(0,0,0,.55); border: 1px solid #fff3;
-    margin-top: 4px; }
-  .bar > div { height: 100%; }
-  #life-fill { background: #37d67a; width: 100%; }
-  #armor-fill { background: #4aa3ff; width: 0%; }
-  #hud-topright { top: 14px; right: 16px; text-align: right; font-size: 20px; }
-  #wanted { font-size: 34px; letter-spacing: 4px; color: #ffd23e; }
-  #hud-objective { left: 16px; bottom: 16px; font-size: 19px; background: rgba(0,0,0,.5);
-    padding: 8px 12px; border-left: 4px solid #ffd23e; max-width: 520px; }
-  #minimap { position: fixed; right: 16px; bottom: 16px; z-index: 5; width: 208px; height: 208px;
-    border: 2px solid rgba(255,255,255,.65); background: rgba(8,12,24,.72); }
-  #menu { position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column;
-    align-items: center; justify-content: center; gap: 14px; color: #fff; text-align: center;
-    background: linear-gradient(180deg, rgba(6,10,26,.25), rgba(6,10,26,.78)); }
-  #menu h1 { font-size: 64px; margin: 0; letter-spacing: 6px; text-shadow: 0 3px 18px #000; }
-  #menu p { margin: 0; font-size: 19px; max-width: 640px; text-shadow: 0 1px 4px #000; }
-  #menu button { pointer-events: auto; font-size: 22px; padding: 12px 34px; cursor: pointer;
-    background: #ffd23e; color: #191410; border: 0; font-weight: 700; letter-spacing: 1px; }
-  #menu button.secondary { background: #e8e8e8; }
-  #menu .districts { font-size: 15px; opacity: .9; }
-  .hidden { display: none !important; }
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #1a1024; }
+  #game { display: block; width: 100vw; height: 100vh; }
+  #loading {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: #ffd9a0; font: 600 20px/1.4 system-ui, sans-serif; letter-spacing: 0.08em;
+    background: #1a1024; z-index: 10; text-align: center; padding: 24px;
+  }
+  /* ---- HUD (R5-2): satu aksen emas, teks putih berbayangan, panel gelap ---- */
+  #hud { position: fixed; inset: 0; z-index: 5; pointer-events: none;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #fff; }
+  .panel { background: rgba(10, 8, 20, 0.55); border-radius: 8px; }
+  /* Kiri atas: bintang wanted besar + nama distrik. */
+  #hud-wanted { position: absolute; left: 16px; top: 14px; }
+  #hud-stars { font-size: 30px; line-height: 1; letter-spacing: 2px;
+    text-shadow: 0 2px 6px rgba(0,0,0,0.8); }
+  #hud-stars .star { color: rgba(255,255,255,0.22); }
+  #hud-stars .star.on { color: #ffd23e; text-shadow: 0 0 10px rgba(255,210,62,0.7), 0 2px 6px rgba(0,0,0,0.8); }
+  #hud-wanted.active #hud-stars .star.on { animation: starpulse 1s ease-in-out infinite; }
+  @keyframes starpulse { 50% { transform: scale(1.12); } }
+  #wanted-label { display: none; margin-top: 2px; font-size: 13px; font-weight: 800;
+    letter-spacing: 0.22em; color: #ff5a4e; text-shadow: 0 2px 6px rgba(0,0,0,0.9); }
+  #hud-wanted.hot #wanted-label { display: block; animation: starpulse 0.8s ease-in-out infinite; }
+  #hud-district { margin-top: 4px; font-size: 13px; font-weight: 600; letter-spacing: 0.06em;
+    color: rgba(255,255,255,0.85); text-shadow: 0 1px 4px rgba(0,0,0,0.9); }
+  /* Kanan atas: uang + jam. */
+  #hud-money { position: absolute; right: 16px; top: 14px; text-align: right; }
+  #hud-cash { font-size: 28px; font-weight: 800; letter-spacing: 0.02em;
+    color: #7ddb8a; text-shadow: 0 2px 6px rgba(0,0,0,0.9); }
+  #hud-clock { font-size: 15px; font-weight: 600; color: rgba(255,255,255,0.9);
+    text-shadow: 0 1px 4px rgba(0,0,0,0.9); }
+  /* Tengah atas: panel objektif misi. */
+  #hud-mission { position: absolute; left: 50%; top: 14px; transform: translateX(-50%);
+    max-width: 430px; padding: 9px 16px 10px; text-align: center; }
+  #mission-title { font-size: 11px; font-weight: 800; letter-spacing: 0.24em; color: #ffd23e; }
+  #mission-objective { font-size: 15px; font-weight: 600; line-height: 1.35; margin-top: 2px;
+    text-shadow: 0 1px 4px rgba(0,0,0,0.9); }
+  #mission-objective.done { color: #7ddb8a; }
+  #mission-timer { font-size: 13px; font-weight: 800; color: #ffd23e; margin-top: 3px;
+    text-shadow: 0 1px 4px rgba(0,0,0,0.9); }
+  #mission-timer.urgent { color: #ff5a4e; animation: starpulse 0.5s ease-in-out infinite; }
+  /* Daftar unit polisi (muncul saat wanted > 0). */
+  #police-list { margin-top: 6px; font-size: 12px; font-weight: 700; letter-spacing: 0.08em;
+    color: #7db8ff; text-shadow: 0 1px 4px rgba(0,0,0,0.9); }
+  #police-list.hidden { display: none; }
+  /* Kiri bawah: LIFE + ARMOR. */
+  #hud-vitals { position: absolute; left: 16px; bottom: 16px; width: 230px; }
+  .vital { margin-top: 8px; }
+  .vital-label { display: flex; justify-content: space-between; font-size: 12px; font-weight: 700;
+    letter-spacing: 0.12em; text-shadow: 0 1px 4px rgba(0,0,0,0.9); margin-bottom: 3px; }
+  .vital-bar { height: 13px; border-radius: 7px; background: rgba(0,0,0,0.55);
+    border: 1px solid rgba(255,255,255,0.25); overflow: hidden; }
+  .vital-fill { height: 100%; border-radius: 6px; transition: width 0.2s ease-out; }
+  #life-fill { background: linear-gradient(90deg, #2fae5f, #37d67a); }
+  #life-fill.low { background: linear-gradient(90deg, #c22e2e, #ff5a4e); }
+  #armor-fill { background: linear-gradient(90deg, #2f7fb8, #4db8ff); }
+  /* Kanan bawah: speedometer + minimap. */
+  #hud-right { position: absolute; right: 16px; bottom: 16px; text-align: right; }
+  #hud-speed { margin-bottom: 8px; }
+  #speed-num { font-size: 42px; font-weight: 800; line-height: 1; text-shadow: 0 2px 8px rgba(0,0,0,0.9); }
+  #speed-unit { font-size: 14px; font-weight: 600; color: rgba(255,255,255,0.85); margin-left: 4px; }
+  #mode-chip { display: inline-block; margin-left: 10px; padding: 3px 8px; font-size: 11px;
+    font-weight: 800; letter-spacing: 0.14em; color: #ffd23e;
+    border: 1px solid rgba(255,210,62,0.6); border-radius: 4px;
+    background: rgba(10,8,20,0.55); vertical-align: 8px; }
+  #minimap { display: block; width: 200px; height: 200px; border-radius: 8px;
+    border: 2px solid rgba(255,255,255,0.35); background: #241a2e;
+    box-shadow: 0 4px 18px rgba(0,0,0,0.5); }
+  /* Tengah: toast feedback (carjacking, dll). */
+  #toast { position: absolute; left: 50%; top: 34%; transform: translate(-50%, -50%) scale(0.96);
+    padding: 10px 22px; font-size: 21px; font-weight: 800; letter-spacing: 0.02em;
+    opacity: 0; transition: opacity 0.25s ease, transform 0.25s ease;
+    text-shadow: 0 2px 6px rgba(0,0,0,0.9); white-space: nowrap; }
+  #toast.show { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  /* Bawah tengah: hint kontrol (menghilang setelah 14 detik). */
+  #hint { position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%);
+    padding: 6px 14px; font-size: 13px; font-weight: 600; color: rgba(255,255,255,0.9);
+    transition: opacity 1s ease; white-space: nowrap; }
+  #hint.hidden { opacity: 0; }
+  /* Crosshair saat jalan kaki (mode tembak). */
+  #crosshair { position: absolute; left: 50%; top: 50%; width: 10px; height: 10px;
+    transform: translate(-50%, -50%); }
+  #crosshair::before, #crosshair::after { content: ""; position: absolute; background: #fff;
+    box-shadow: 0 0 4px rgba(0,0,0,0.9); }
+  #crosshair::before { left: 4px; top: 0; width: 2px; height: 10px; }
+  #crosshair::after { left: 0; top: 4px; width: 10px; height: 2px; }
+  #crosshair.hidden { display: none; }
+  /* Flash merah saat tertembak (diatur opacity-nya dari hud.js). */
+  #damage-flash { position: fixed; inset: 0; z-index: 8; pointer-events: none; opacity: 0;
+    background: radial-gradient(ellipse at center, rgba(255,0,0,0) 55%, rgba(255,0,0,0.55) 100%); }
+  /* Layar BUSTED / WASTED + respawn. */
+  #busted-overlay { position: fixed; inset: 0; z-index: 9; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; background: rgba(8,4,12,0.82);
+    opacity: 0; pointer-events: none; transition: opacity 0.3s ease;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #fff; }
+  #busted-overlay.show { opacity: 1; pointer-events: auto; }
+  #busted-title { font-size: 72px; font-weight: 900; letter-spacing: 0.14em; color: #ff5a4e;
+    text-shadow: 0 4px 24px rgba(255,60,40,0.6); }
+  #busted-title.dead { color: #c9c9c9; text-shadow: 0 4px 24px rgba(255,255,255,0.4); }
+  #busted-sub { margin-top: 10px; font-size: 17px; font-weight: 600; color: rgba(255,255,255,0.9); }
+  #busted-hint { margin-top: 22px; font-size: 14px; font-weight: 700; letter-spacing: 0.1em; color: #ffd23e; }
+  /* Menu awal (R5-4): panel tengah, game jalan di belakangnya (auto-drive +
+     wanted 2) — begitu MULAI ditekan, frame pertama langsung beraksi. */
+  #menu { position: fixed; inset: 0; z-index: 7; display: flex; align-items: center;
+    justify-content: center; pointer-events: none;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #fff; }
+  #menu.hidden { display: none; }
+  #menu-panel { pointer-events: auto; text-align: center; padding: 28px 44px 24px;
+    background: rgba(10, 6, 18, 0.72); border: 1px solid rgba(255, 210, 62, 0.35);
+    border-radius: 14px; box-shadow: 0 8px 40px rgba(0,0,0,0.6); }
+  #menu-title { font-size: 44px; font-weight: 900; letter-spacing: 0.12em; color: #ffd23e;
+    text-shadow: 0 3px 14px rgba(0,0,0,0.9); }
+  #menu-sub { margin-top: 4px; font-size: 14px; font-weight: 700; letter-spacing: 0.3em;
+    color: rgba(255,255,255,0.85); }
+  #start-btn { margin-top: 18px; padding: 12px 44px; font-size: 20px; font-weight: 800;
+    letter-spacing: 0.14em; color: #1a1024; background: #ffd23e; border: none;
+    border-radius: 8px; cursor: pointer; box-shadow: 0 4px 18px rgba(255,210,62,0.45); }
+  #start-btn:hover { background: #ffe07a; }
+  #menu-controls { margin-top: 16px; font-size: 13px; font-weight: 600; line-height: 1.7;
+    color: rgba(255,255,255,0.85); text-shadow: 0 1px 4px rgba(0,0,0,0.9); }
 </style>
 </head>
 <body>
 <canvas id="game"></canvas>
-
-<div class="hud" id="hud-topleft">
-  <div class="cash">$<span id="cash">250</span></div>
-  <div>LIFE</div><div class="bar"><div id="life-fill"></div></div>
-  <div>ARMOR</div><div class="bar"><div id="armor-fill"></div></div>
+<div id="loading">TALLOW POINT — memuat kota…</div>
+<div id="hud">
+  <div id="hud-wanted">
+    <div id="hud-stars"></div>
+    <div id="wanted-label">WANTED</div>
+    <div id="hud-district">Crater Row</div>
+    <div id="police-list" class="hidden"></div>
+  </div>
+  <div id="hud-money">
+    <div id="hud-cash">$500</div>
+    <div id="hud-clock">18:37</div>
+  </div>
+  <div id="hud-mission" class="panel">
+    <div id="mission-title">MISI</div>
+    <div id="mission-objective">Kenali Crater Row — curi sebuah mobil (E)</div>
+    <div id="mission-timer"></div>
+  </div>
+  <div id="hud-vitals">
+    <div class="vital">
+      <div class="vital-label"><span>LIFE</span><span id="life-text">100</span></div>
+      <div class="vital-bar"><div id="life-fill" class="vital-fill" style="width:100%"></div></div>
+    </div>
+    <div class="vital">
+      <div class="vital-label"><span>ARMOR</span><span id="armor-text">0</span></div>
+      <div class="vital-bar"><div id="armor-fill" class="vital-fill" style="width:0%"></div></div>
+    </div>
+  </div>
+  <div id="hud-right">
+    <div id="hud-speed"><span id="speed-num">0</span><span id="speed-unit">km/j</span><span id="mode-chip">MENGEMUDI</span></div>
+    <canvas id="minimap" width="220" height="220"></canvas>
+  </div>
+  <div id="toast" class="panel"></div>
+  <div id="hint" class="panel">WASD jalan / mengemudi · E masuk &amp; curi mobil · F tembak · R respawn · M mute · Space rem tangan · drag mouse putar kamera</div>
+  <div id="crosshair" class="hidden"></div>
 </div>
-<div class="hud" id="hud-topright">
-  <div id="clock">09:30</div>
-  <div id="wanted"></div>
+<div id="damage-flash"></div>
+<div id="busted-overlay">
+  <div id="busted-title">BUSTED</div>
+  <div id="busted-sub">Ditangkap polisi — uang berkurang 10%</div>
+  <div id="busted-hint">TEKAN R UNTUK KEMBALI KE CRATER ROW</div>
 </div>
-<div class="hud" id="hud-objective">Welcome to Tallow Point — explore the city. Your safehouse is in Crater Row.</div>
-<canvas id="minimap" width="208" height="208"></canvas>
-
 <div id="menu">
-  <h1>TALLOW POINT</h1>
-  <p>An open-world crime game. Walk the streets of a sun-soaked city, steal a car,
-     outrun the police, and work your way through five story missions.</p>
-  <p class="districts">Kessel Wharf &middot; Northline &middot; Moraine Heights &middot; Crater Row &middot; Sunmere</p>
-  <button id="btn-start">START A LIFE</button>
-  <button id="btn-new" class="secondary">NEW LIFE</button>
-  <p class="districts">WASD walk &middot; E steal car &middot; Space shoot &middot; F punch &middot; mouse camera &middot; R respawn</p>
+  <div id="menu-panel">
+    <div id="menu-title">TALLOW POINT</div>
+    <div id="menu-sub">GTA VI — VICE CITY</div>
+    <button id="start-btn">▶ MULAI</button>
+    <div id="menu-controls">WASD jalan / mengemudi · E masuk &amp; curi mobil · F tembak<br>
+    R respawn · M mute · Space rem tangan · drag mouse putar kamera</div>
+  </div>
 </div>
-
-<script src="vendor/three.min.js"></script>
-<script src="src/config.js"></script>
-<script src="src/random.js"></script>
-<script src="src/city.js"></script>
-<script src="src/render.js"></script>
-<script src="src/entities.js"></script>
-<script src="src/game.js"></script>
-<script src="src/input.js"></script>
-<script src="src/update.js"></script>
-<script src="src/hud.js"></script>
-<script src="src/menu.js"></script>
-<script src="src/police.js"></script>
-<script src="src/story.js"></script>
-<script src="src/save.js"></script>
-<script src="src/audio.js"></script>
-<script src="src/combat.js"></script>
-<script src="src/main.js"></script>
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three.module.js"
+  }
+}
+</script>
+<script type="module" src="./src/main.js"></script>
 </body>
 </html>
