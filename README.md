@@ -27,7 +27,7 @@ block, traffic follows the road graph, and pedestrians walk the sidewalks.
 - Five story missions with HUD objectives and cash rewards.
 - Combat on foot, LIFE and ARMOR, BUSTED and DEAD screens with respawn.
 - HUD with cash, LIFE/ARMOR bars, clock, wanted stars and a live minimap.
-- Day/night cycle, street lamps, and a save in localStorage.
+- Golden-hour lighting, street lamps, and a save in localStorage.
 - Procedural sound: engine, crashes, gunfire, sirens and a simple score —
   all generated locally, no audio files.
 

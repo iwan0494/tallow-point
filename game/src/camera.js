@@ -1,183 +1,108 @@
-// Tallow Point — camera.js
-// Kamera chase third-person (skill camera-systems).
-// Ditulis fresh dari R5_SPEC_2026-11-19.md (R5-1).
-// Prinsip: follow dengan 1 - exp(-rate*dt) (BUKAN lerp tetap per frame),
-// deadzone kecil, look-ahead ke arah gerak, spring-arm anti-clip supaya
-// kamera tidak menembus bangunan. Shake (game-feel) menumpang di atas
-// follow — tidak pernah ditulis ke dalam target follow.
+// camera.js — third-person chase camera: exponential follow, deadzone,
+// look-ahead, spring-arm pull-in on buildings, trauma shake on top.
+// Never a bird's-eye overview: the camera stays low, street level, behind
+// the player/car so the action fills the frame. Classic script, namespace TP.
+window.TP = window.TP || {};
+(function (TP) {
+  'use strict';
 
-import * as THREE from "three";
-import { CAMERA } from "./config.js";
+  // NOTE: the heading getter is named getCamHeading on purpose. An earlier
+  // build had `var camHeading = 0` colliding with `function camHeading()`,
+  // which broke on-foot controls entirely.
+  function createCamera(camera, city) {
+    var state = {
+      focus: new THREE.Vector3(0, 1.5, 0),
+      yaw: 0,
+      trauma: 0,
+      t: 0,
+      rate: 9,            // follow rate (fixed from 5.5: cruisers were out of frame)
+      distDrive: 10,      // driving: 10 m back, 4 m up (closer than before)
+      heightDrive: 4,
+      distWalk: 6,
+      heightWalk: 2.6,
+    };
 
-const _v1 = new THREE.Vector3();
-const _v2 = new THREE.Vector3();
-const _dir = new THREE.Vector3();
+    function getCamHeading() { return state.yaw; }
 
-function dampFactor(rate, dt) {
-  return 1 - Math.exp(-rate * dt);
-}
+    function addTrauma(amount) {
+      state.trauma = Math.min(state.trauma + amount, 1);
+    }
 
-function lerpAngle(a, b, t) {
-  let d = (b - a) % (Math.PI * 2);
-  if (d > Math.PI) d -= Math.PI * 2;
-  if (d < -Math.PI) d += Math.PI * 2;
-  return a + d * t;
-}
-
-// Uji segmen (p0 -> p1) terhadap AABB gedung (XZ + tinggi). Kembalikan
-// parameter t terkecil saat segmen masuk kotak, atau null kalau tidak kena.
-// Dipakai spring-arm: kamera ditarik masuk tepat sebelum titik tabrakan.
-function segmentHitsBox(p0, p1, box) {
-  let tMin = 0;
-  let tMax = 1;
-  const dx = p1.x - p0.x;
-  const dy = p1.y - p0.y;
-  const dz = p1.z - p0.z;
-  const axes = [
-    [p0.x, dx, box.minX, box.maxX],
-    [p0.y, dy, 0, box.top],
-    [p0.z, dz, box.minZ, box.maxZ],
-  ];
-  for (const [p, d, lo, hi] of axes) {
-    if (Math.abs(d) < 1e-9) {
-      if (p < lo || p > hi) return null;
-    } else {
-      let t1 = (lo - p) / d;
-      let t2 = (hi - p) / d;
-      if (t1 > t2) {
-        const tmp = t1;
-        t1 = t2;
-        t2 = tmp;
+    // AABB pull-in: shorten the boom when a building blocks the camera ray.
+    function pullIn(from, to, colliders) {
+      var best = 1;
+      var dx = to.x - from.x, dz = to.z - from.z;
+      for (var i = 0; i < colliders.length; i++) {
+        var c = colliders[i];
+        var tmin = 0, tmax = 1;
+        if (Math.abs(dx) > 1e-6) {
+          var tx1 = (c.minX - from.x) / dx, tx2 = (c.maxX - from.x) / dx;
+          tmin = Math.max(tmin, Math.min(tx1, tx2));
+          tmax = Math.min(tmax, Math.max(tx1, tx2));
+        } else if (from.x < c.minX || from.x > c.maxX) continue;
+        if (Math.abs(dz) > 1e-6) {
+          var tz1 = (c.minZ - from.z) / dz, tz2 = (c.maxZ - from.z) / dz;
+          tmin = Math.max(tmin, Math.min(tz1, tz2));
+          tmax = Math.min(tmax, Math.max(tz1, tz2));
+        } else if (from.z < c.minZ || from.z > c.maxZ) continue;
+        if (tmax >= tmin && tmin < best) best = Math.max(tmin - 0.05, 0.15);
       }
-      tMin = Math.max(tMin, t1);
-      tMax = Math.min(tMax, t2);
-      if (tMin > tMax) return null;
+      return best;
     }
-  }
-  return tMin;
-}
 
-export class ChaseCamera {
-  constructor(camera, buildingBoxes) {
-    this.camera = camera;
-    this.buildingBoxes = buildingBoxes;
-    this.focus = new THREE.Vector3(0, 1.5, 0); // titik yang diikuti (XZ + tinggi).
-    this.yaw = Math.PI; // menghadap +Z di awal (mobil menghadap +Z).
-    this.distance = CAMERA.driving.distance;
-    this.height = CAMERA.driving.height;
-    this.mode = "driving";
-    this.trauma = 0; // game-feel: 0..1, decay tiap frame (real time).
-    this._shakeT = 0;
-    this._snapNext = true; // potong keras saat pertama kali / teleport.
-    this.pitchUp = 0; // R5-4: meter lookAt dinaikkan (kamera menengadah) saat heli aktif.
-    this._pitchUpTarget = 0;
-  }
-
-  // R5-4: naikkan titik pandang supaya helikopter masuk frame.
-  setPitchUp(meters) {
-    this._pitchUpTarget = meters;
-  }
-
-  setMode(mode) {
-    if (mode !== this.mode && (mode === "driving" || mode === "onFoot")) {
-      this.mode = mode;
-    }
-  }
-
-  // Potong kamera langsung ke target (dipakai saat spawn / respawn / teleport).
-  snapTo(targetPos, heading) {
-    this.yaw = heading;
-    this.focus.set(targetPos.x, targetPos.y + 1.4, targetPos.z);
-    this._snapNext = true;
-  }
-
-  // Trauma shake (game-feel): hit kecil 0.15, sedang 0.4, besar 0.8.
-  addTrauma(amount) {
-    this.trauma = Math.min(1, this.trauma + amount);
-  }
-
-  // targetPos: posisi target (Vector3). heading: arah hadap target (radian,
-  // 0 = +Z). speed: laju target (m/s) untuk look-ahead. dt: detik.
-  update(dt, targetPos, heading, speed, mode) {
-    this.setMode(mode || "driving");
-    const cfg = this.mode === "driving" ? CAMERA.driving : CAMERA.onFoot;
-
-    // 1. Yaw mengikuti heading target (dihaluskan).
-    this.yaw = lerpAngle(this.yaw, heading, dampFactor(4.5, dt));
-
-    // 2. Fokus = target + look-ahead ke arah gerak.
-    const lead = Math.min(cfg.lookAhead, cfg.lookAhead * (speed / 8) + 0.4);
-    _v1.set(Math.sin(this.yaw), 0, Math.cos(this.yaw)).multiplyScalar(lead);
-    _v2.set(targetPos.x + _v1.x, targetPos.y + 1.4, targetPos.z + _v1.z);
-
-    // 3. Deadzone: fokus hanya bergerak kalau target keluar dari radiusnya.
-    const dx = _v2.x - this.focus.x;
-    const dz = _v2.z - this.focus.z;
-    const distXZ = Math.hypot(dx, dz);
-    if (distXZ > CAMERA.deadzone) {
-      const overflow = distXZ - CAMERA.deadzone;
-      const t = dampFactor(cfg.followRate, dt) * (overflow / distXZ);
-      this.focus.x += dx * t;
-      this.focus.z += dz * t;
-    }
-    this.focus.y += (_v2.y - this.focus.y) * dampFactor(cfg.followRate, dt);
-
-    // 4. Jarak + tinggi dihaluskan saat ganti mode (jalan kaki <-> mobil).
-    this.distance += (cfg.distance - this.distance) * dampFactor(3.0, dt);
-    this.height += (cfg.height - this.height) * dampFactor(3.0, dt);
-
-    // 5. Posisi kamera yang diinginkan: di belakang target, setinggi height.
-    _dir.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
-    _v1.copy(this.focus).addScaledVector(_dir, this.distance);
-    _v1.y = this.focus.y + this.height;
-
-    // 6. Spring-arm: tarik kamera masuk kalau segmen fokus->kamera menembus gedung.
-    let reach = 1;
-    for (const box of this.buildingBoxes) {
-      // Lewati kotak yang jauh dari segmen (cepat, tanpa hitung detail).
-      if (
-        Math.min(this.focus.x, _v1.x) > box.maxX + 1 ||
-        Math.max(this.focus.x, _v1.x) < box.minX - 1 ||
-        Math.min(this.focus.z, _v1.z) > box.maxZ + 1 ||
-        Math.max(this.focus.z, _v1.z) < box.minZ - 1
-      ) {
-        continue;
+    function update(dt, target, heading, driving) {
+      // Deadzone: ignore tiny target wobble so the frame does not twitch.
+      var dx = target.x - state.focus.x, dz = target.z - state.focus.z;
+      var dist = Math.sqrt(dx * dx + dz * dz);
+      var goal = new THREE.Vector3(target.x, target.y + 1.4, target.z);
+      if (dist > 0.6) {
+        // Look-ahead: aim a little ahead of the direction of travel.
+        var lead = driving ? 3.5 : 1.2;
+        goal.x += Math.sin(heading) * lead;
+        goal.z += Math.cos(heading) * lead;
       }
-      const t = segmentHitsBox(this.focus, _v1, box);
-      if (t !== null && t < reach) reach = Math.max(0, t - 0.04);
+      var k = 1 - Math.exp(-state.rate * dt);
+      state.focus.lerp(goal, k);
+      state.yaw = heading;
+
+      var distCam = driving ? state.distDrive : state.distWalk;
+      var heightCam = driving ? state.heightDrive : state.heightWalk;
+      var back = new THREE.Vector3(
+        state.focus.x - Math.sin(heading) * distCam,
+        state.focus.y + heightCam,
+        state.focus.z - Math.cos(heading) * distCam
+      );
+      var pull = pullIn(state.focus, back, city.colliders);
+      back.lerpVectors(state.focus, back, pull);
+      if (back.y < 1.2) back.y = 1.2;
+
+      // Trauma shake rides on top of the smooth follow (summed sines, real dt).
+      state.t += dt * 30;
+      if (state.trauma > 0) {
+        state.trauma = Math.max(state.trauma - 1.2 * dt, 0);
+        var sh = state.trauma * state.trauma;
+        back.x += 0.35 * sh * Math.sin(state.t * 1.7);
+        back.y += 0.25 * sh * Math.sin(state.t * 2.3);
+      }
+
+      camera.position.copy(back);
+      camera.lookAt(state.focus.x, state.focus.y, state.focus.z);
     }
-    // Jarak minimum supaya kamera tidak menempel ke target.
-    const fullLen = this.distance;
-    const pulledLen = Math.max(CAMERA.minDistance, fullLen * reach);
-    _v1.copy(this.focus).addScaledVector(_dir, pulledLen);
-    _v1.y = this.focus.y + this.height * (pulledLen / fullLen);
 
-    // 7. Posisikan kamera (dihaluskan), atau potong keras kalau diminta.
-    if (this._snapNext) {
-      this.camera.position.copy(_v1);
-      this._snapNext = false;
-    } else {
-      this.camera.position.lerp(_v1, dampFactor(cfg.followRate * 1.4, dt));
+    // Hard cut (teleport / respawn / staging): reset smoothing so the camera
+    // does not whip across the city.
+    function snap(target, heading, driving) {
+      state.focus.set(target.x, target.y + 1.4, target.z);
+      state.yaw = heading;
+      state.trauma = 0;
+      update(0.016, target, heading, driving);
     }
 
-    // 8. Shake (game-feel): offset dari trauma^2, summed sines, decay real-time.
-    this.trauma = Math.max(0, this.trauma - 1.2 * dt);
-    this._shakeT += dt * 30;
-    const shake = this.trauma * this.trauma;
-    const ox = 0.35 * shake * Math.sin(this._shakeT * 1.7);
-    const oy = 0.25 * shake * Math.sin(this._shakeT * 2.3);
-    const oz = 0.35 * shake * Math.sin(this._shakeT * 1.3);
-
-    // R5-4: pitch-up dihaluskan menuju target (heli aktif -> menengadah).
-    this.pitchUp += (this._pitchUpTarget - this.pitchUp) * dampFactor(2.5, dt);
-
-    this.camera.position.x += ox;
-    this.camera.position.y += oy;
-    this.camera.position.z += oz;
-    this.camera.lookAt(
-      this.focus.x + ox * 0.5,
-      this.focus.y + 1.1 + this.pitchUp,
-      this.focus.z + oz * 0.5
-    );
+    return {
+      update: update, snap: snap, addTrauma: addTrauma,
+      getCamHeading: getCamHeading, state: state,
+    };
   }
-}
+
+  TP.Camera = { create: createCamera };
+})(window.TP);

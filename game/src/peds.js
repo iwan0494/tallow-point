@@ -1,240 +1,88 @@
-// Tallow Point — peds.js
-// Pejalan kaki AI: berjalan di trotoar mengelilingi blok, menghindar dari
-// mobil yang mendekat, dan pengemudi yang kabur saat mobilnya dicuri.
-// Ditulis fresh dari R5_SPEC_2026-11-19.md + R4_SPEC_2026-11-19.md (R5-2).
-// - Trotoar = keliling blok (persegi panjang di tepi blok + 1 m ke luar).
-// - Menghindar: kalau ada kendaraan cepat dalam 5 m dan mengarah ke pejalan
-//   kaki, pejalan kaki melangkah menjauh dari kendaraan selama ~1,2 detik.
-// - Kabur (flee): lari menjauhi titik carjacking 4,5 m/s, lalu dihapus.
+// peds.js — 22 pedestrians strolling the sidewalks. They walk a leg, wait,
+// then pick a new direction; when a car comes close they step aside.
+// Classic script, namespace TP.
+window.TP = window.TP || {};
+(function (TP) {
+  'use strict';
 
-import * as THREE from "three";
-import { GAME, PEDS } from "./config.js";
-import { makeRng } from "./random.js";
+  var SHIRTS = [0xc04040, 0x40a040, 0x4080c0, 0xd8a020, 0x8040a0, 0xe0e0e0, 0x303030];
 
-const SHIRTS = [0x3a6a8a, 0x8a3a3a, 0x5a7a3a, 0x7a5a8a, 0xc0c0c0, 0x2a2a2a, 0xd9a03a];
+  function createPeds(scene, city, rng) {
+    var peds = [];
+    var graph = city.graph;
 
-// Pejalan kaki sederhana: badan + kepala, tinggi ~1,7 m.
-export function makePedMesh(THREE, rng) {
-  const g = new THREE.Group();
-  g.name = "ped";
-  const shirt = new THREE.MeshStandardMaterial({
-    color: rng.pick(SHIRTS),
-    roughness: 0.85,
-  });
-  const pants = new THREE.MeshStandardMaterial({ color: 0x2a2a30, roughness: 0.9 });
-  const skin = new THREE.MeshStandardMaterial({ color: 0xc99a72, roughness: 0.6 });
-  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.6, 0.26), shirt);
-  torso.position.y = 1.05;
-  torso.castShadow = true;
-  g.add(torso);
-  const head = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.28, 0.28), skin);
-  head.position.y = 1.52;
-  head.castShadow = true;
-  g.add(head);
-  const legGeo = new THREE.BoxGeometry(0.18, 0.72, 0.2);
-  const legL = new THREE.Mesh(legGeo, pants);
-  legL.position.set(-0.12, 0.36, 0);
-  const legR = new THREE.Mesh(legGeo, pants);
-  legR.position.set(0.12, 0.36, 0);
-  g.add(legL);
-  g.add(legR);
-  return { group: g, legL, legR };
-}
-
-export class Ped {
-  constructor(mesh, legL, legR) {
-    this.mesh = mesh;
-    this.legL = legL;
-    this.legR = legR;
-    this.pos = mesh.position;
-    this.heading = 0;
-    this.speed = 1.2;
-    this.mode = "walk"; // "walk" | "dodge" | "flee"
-    this.dodgeTimer = 0;
-    this.fleeTimer = 0;
-    this.walkPhase = 0;
-    // Rute trotoar: 4 sudut keliling blok, arah acak.
-    this.corners = [];
-    this.corner = 0;
-    this.dodgeTarget = null;
-  }
-}
-
-export class PedManager {
-  constructor(scene, city, rng) {
-    this.scene = scene;
-    this.city = city;
-    this.rng = rng || makeRng(20261119 + 999);
-    this.list = [];
-  }
-
-  // Spawn pejalan kaki di trotoar blok acak.
-  spawn(count) {
-    const out = [];
-    for (let n = 0; n < count; n++) {
-      const ped = this._makePed();
-      const bx = this.rng.int(0, GAME.grid - 1);
-      const bz = this.rng.int(0, GAME.grid - 1);
-      this._assignBlock(ped, bx, bz);
-      this.list.push(ped);
-      out.push(ped);
+    for (var i = 0; i < 22; i++) {
+      var n = graph.nodes[rng.int(0, graph.nodes.length - 1)];
+      var g = new THREE.Group();
+      var shirt = new THREE.MeshStandardMaterial({
+        color: SHIRTS[i % SHIRTS.length], roughness: 0.8,
+      });
+      var skin = new THREE.MeshStandardMaterial({ color: 0xd8a075, roughness: 0.8 });
+      var torso = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.8, 0.35), shirt);
+      torso.position.y = 1.0; torso.castShadow = true;
+      var head = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.36, 0.36), skin);
+      head.position.y = 1.6; head.castShadow = true;
+      var legL = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.6, 0.26),
+        new THREE.MeshStandardMaterial({ color: 0x2e2a26, roughness: 0.9 }));
+      legL.position.set(-0.15, 0.3, 0);
+      var legR = legL.clone();
+      legR.position.x = 0.15;
+      g.add(torso); g.add(head); g.add(legL); g.add(legR);
+      g.position.set(n.x + rng.range(-4, 4), 0, n.z + rng.range(-4, 4));
+      scene.add(g);
+      peds.push({
+        mesh: g, legL: legL, legR: legR,
+        pos: new THREE.Vector3(g.position.x, 0, g.position.z),
+        heading: rng.range(0, Math.PI * 2),
+        speed: rng.range(0.8, 1.6),
+        wait: rng.range(0, 3),
+        phase: rng.range(0, 6),
+      });
     }
-    return out;
-  }
 
-  _makePed() {
-    const parts = makePedMesh(THREE, this.rng);
-    this.scene.add(parts.group);
-    return new Ped(parts.group, parts.legL, parts.legR);
-  }
-
-  // Keliling blok: 4 sudut di tepi trotoar (blok + 1 m ke luar).
-  _assignBlock(ped, bx, bz) {
-    const cx = -GAME.halfCity + GAME.roadWidth + GAME.blockSize / 2 + bx * GAME.roadPitch;
-    const cz = -GAME.halfCity + GAME.roadWidth + GAME.blockSize / 2 + bz * GAME.roadPitch;
-    const h = GAME.blockSize / 2 + 1.0;
-    let corners = [
-      { x: cx - h, z: cz - h },
-      { x: cx + h, z: cz - h },
-      { x: cx + h, z: cz + h },
-      { x: cx - h, z: cz + h },
-    ];
-    if (this.rng.chance(0.5)) corners = corners.reverse();
-    ped.corners = corners;
-    ped.corner = this.rng.int(0, 3);
-    const start = corners[ped.corner];
-    ped.pos.set(start.x, 0, start.z);
-    ped.speed = this.rng.range(PEDS.walkMin, PEDS.walkMax);
-    ped.mode = "walk";
-  }
-
-  // R5-4 staging screenshot: pindahkan pejalan kaki ke trotoar blok-blok
-  // tertentu (di sisi jalan yang sedang difoto) supaya terlihat di frame.
-  stageOnBlocks(blocks, count) {
-    let placed = 0;
-    for (const ped of this.list) {
-      if (placed >= count) break;
-      if (ped.mode !== "walk") continue;
-      const b = blocks[placed % blocks.length];
-      this._assignBlock(ped, b.bx, b.bz);
-      placed++;
-    }
-    return placed;
-  }
-
-  // Pengemudi yang mobilnya dicuri: lari menjauhi titik itu, lalu hilang.
-  spawnFleeing(x, z, awayHeading) {
-    const ped = this._makePed();
-    ped.pos.set(x, 0, z);
-    ped.heading = awayHeading;
-    ped.speed = PEDS.fleeSpeed;
-    ped.mode = "flee";
-    ped.fleeTimer = PEDS.fleeTime;
-    this.list.push(ped);
-    return ped;
-  }
-
-  update(dt, vehicles) {
-    for (let i = this.list.length - 1; i >= 0; i--) {
-      const ped = this.list[i];
-      if (ped.mode === "flee") {
-        ped.fleeTimer -= dt;
-        if (ped.fleeTimer <= 0) {
-          this.scene.remove(ped.mesh);
-          this.list.splice(i, 1);
-          continue;
+    function update(dt, cars) {
+      peds.forEach(function (p) {
+        // Waiting: stand still, legs settle. The wait timer counts down
+        // and only then does the ped walk again (no stuck else-branch).
+        if (p.wait > 0) {
+          p.wait -= dt;
+          p.legL.rotation.x = 0;
+          p.legR.rotation.x = 0;
+          return;
         }
-        ped.pos.x += Math.sin(ped.heading) * ped.speed * dt;
-        ped.pos.z += Math.cos(ped.heading) * ped.speed * dt;
-        ped.mesh.rotation.y = ped.heading;
-        this._animate(ped, dt);
-        continue;
-      }
-
-      // Menghindar: kendaraan cepat dalam 5 m yang mengarah ke pejalan kaki.
-      if (ped.mode === "walk" && vehicles) {
-        const threat = this._findThreat(ped, vehicles);
-        if (threat) {
-          const dx = ped.pos.x - threat.x;
-          const dz = ped.pos.z - threat.z;
-          const d = Math.hypot(dx, dz) || 1;
-          ped.dodgeTarget = {
-            x: ped.pos.x + (dx / d) * 2.5,
-            z: ped.pos.z + (dz / d) * 2.5,
-          };
-          ped.mode = "dodge";
-          ped.dodgeTimer = 1.2;
+        // Step aside if a car is close and approaching.
+        var dodge = false;
+        for (var i = 0; i < cars.length; i++) {
+          var c = cars[i];
+          if (TP.Physics.dist2(p.pos.x, p.pos.z, c.pos.x, c.pos.z) < 36) {
+            p.heading = Math.atan2(p.pos.x - c.pos.x, p.pos.z - c.pos.z);
+            dodge = true;
+            break;
+          }
         }
-      }
-
-      if (ped.mode === "dodge") {
-        ped.dodgeTimer -= dt;
-        const t = ped.dodgeTarget;
-        const dx = t.x - ped.pos.x;
-        const dz = t.z - ped.pos.z;
-        const d = Math.hypot(dx, dz);
-        if (d > 0.3 && ped.dodgeTimer > 0) {
-          const sp = PEDS.walkMax * 1.6;
-          ped.pos.x += (dx / d) * sp * dt;
-          ped.pos.z += (dz / d) * sp * dt;
-          ped.heading = Math.atan2(dx, dz);
-          ped.mesh.rotation.y = ped.heading;
-          this._animate(ped, dt);
-        } else {
-          ped.mode = "walk";
-          ped.dodgeTarget = null;
-          // Lanjut dari sudut terdekat supaya tidak jalan memotong blok.
-          let best = 0;
-          let bestD = Infinity;
-          ped.corners.forEach((c, idx) => {
-            const dd = Math.hypot(c.x - ped.pos.x, c.z - ped.pos.z);
-            if (dd < bestD) {
-              bestD = dd;
-              best = idx;
-            }
-          });
-          ped.corner = best;
+        if (!dodge && Math.random() < dt * 0.08) {
+          p.heading += (Math.random() - 0.5) * 1.2;
         }
-        continue;
-      }
-
-      // Jalan normal: menuju sudut berikutnya di keliling blok.
-      const target = ped.corners[ped.corner];
-      const dx = target.x - ped.pos.x;
-      const dz = target.z - ped.pos.z;
-      const d = Math.hypot(dx, dz);
-      if (d < 0.8) {
-        ped.corner = (ped.corner + 1) % ped.corners.length;
-      } else {
-        ped.pos.x += (dx / d) * ped.speed * dt;
-        ped.pos.z += (dz / d) * ped.speed * dt;
-        ped.heading = Math.atan2(dx, dz);
-        ped.mesh.rotation.y = ped.heading;
-        this._animate(ped, dt);
-      }
+        p.pos.x += Math.sin(p.heading) * p.speed * dt;
+        p.pos.z += Math.cos(p.heading) * p.speed * dt;
+        // Keep peds inside the city.
+        var lim = city.graph.half + 20;
+        if (Math.abs(p.pos.x) > lim || Math.abs(p.pos.z) > lim) {
+          p.heading += Math.PI;
+          p.pos.x = TP.Physics.clamp(p.pos.x, -lim, lim);
+          p.pos.z = TP.Physics.clamp(p.pos.z, -lim, lim);
+        }
+        if (Math.random() < dt * 0.05) p.wait = rng.range(1, 4);
+        p.phase += dt * p.speed * 4;
+        p.legL.rotation.x = Math.sin(p.phase) * 0.45;
+        p.legR.rotation.x = -Math.sin(p.phase) * 0.45;
+        p.mesh.position.copy(p.pos);
+        p.mesh.rotation.y = p.heading;
+      });
     }
+
+    return { peds: peds, update: update };
   }
 
-  // Kendaraan yang mengancam: cepat (>2 m/s), dekat (<5 m), mengarah ke ped.
-  _findThreat(ped, vehicles) {
-    for (const v of vehicles) {
-      if (Math.abs(v.speed) < 2) continue;
-      const dx = ped.pos.x - v.pos.x;
-      const dz = ped.pos.z - v.pos.z;
-      const d = Math.hypot(dx, dz);
-      if (d > 5 || d < 0.01) continue;
-      const fx = Math.sin(v.heading);
-      const fz = Math.cos(v.heading);
-      const toward = (dx * fx + dz * fz) / d;
-      if (toward < -0.5) return { x: v.pos.x, z: v.pos.z };
-    }
-    return null;
-  }
-
-  _animate(ped, dt) {
-    ped.walkPhase += dt * ped.speed * 2.4;
-    const s = Math.sin(ped.walkPhase) * 0.4;
-    ped.legL.rotation.x = s;
-    ped.legR.rotation.x = -s;
-  }
-}
+  TP.Peds = { create: createPeds };
+})(window.TP);

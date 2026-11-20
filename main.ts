@@ -1,102 +1,80 @@
-// Tallow Point — main.ts (kit entry, R5)
-// Dijalankan kit: `MAKEFUN_OUTPUT_DIR=out node main.ts` (Node 24, type-stripping).
-// Tugasnya: verifikasi file game ada + tulis dossier.json ke output dir.
-// Tanpa network, tanpa server — hanya baca file lokal lalu tulis dossier.
-// Screenshot (4 buah) + dossier final dikerjakan R5-4.
+// Tallow Point — gta6-01 entry program (Node 22, standard library only).
+// Copies game/ and screenshots/ from this repository to the output
+// directory and writes /output/dossier.json with the kit's vendored
+// library. Outside the grader, MAKEFUN_OUTPUT_DIR stands in for /output:
+//   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
+//
+// Before writing the dossier it refuses the two failure modes that sank
+// the previous round: a vendored three.js module build (three.module.js /
+// three.core.js) must not be in game/, and the minified three.min.js must
+// stay under 1 MiB. The game itself loads three.js from the global THREE
+// object that vendor/three.min.js provides via a plain <script> tag.
 
-import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { cpSync, existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { buildDossier } from './vendor/makefun-game.ts';
 
-const REPO = resolve(import.meta.dirname, ".");
-const OUT = resolve(process.env.MAKEFUN_OUTPUT_DIR ?? "out");
+const here = fileURLToPath(new URL('.', import.meta.url));
+const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+const gameDir = join(here, 'game');
+const shotDir = join(here, 'screenshots');
 
-const REQUIRED_FILES: string[] = [
-  "game/index.html",
-  "game/vendor/three.module.js",
-  "game/src/config.js",
-  "game/src/random.js",
-  "game/src/city.js",
-  "game/src/camera.js",
-  "game/src/render.js",
-  "game/src/main.js",
-  "game/src/input.js",
-  "game/src/physics.js",
-  "game/src/player.js",
-  "game/src/vehicles.js",
-  "game/src/peds.js",
-  "game/src/hud.js",
-  "game/src/police.js",
-  "game/src/missions.js",
-  "game/src/combat.js",
-  "game/src/audio.js",
-  "game/src/save.js",
-  "game/src/effects.js",
-  "game/screenshots/1-start.png",
-  "game/screenshots/2-city.png",
-  "game/screenshots/3-chase.png",
-  "game/screenshots/4-police.png",
-];
-
-function sha256(path: string): string {
-  return createHash("sha256").update(readFileSync(path)).digest("hex");
+function fail(message: string): never {
+  console.error('main.ts: ' + message);
+  process.exit(1);
 }
 
-function listFiles(dir: string, base: string): { path: string; bytes: number; sha256: string }[] {
-  const out: { path: string; bytes: number; sha256: string }[] = [];
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const full = join(dir, entry.name);
-    const rel = join(base, entry.name);
-    if (entry.isDirectory()) {
-      if (entry.name === ".git") continue;
-      out.push(...listFiles(full, rel));
-    } else if (entry.isFile()) {
-      out.push({ path: rel, bytes: statSync(full).size, sha256: sha256(full) });
-    }
+// 1. The forbidden module builds must not be in the game.
+for (const bad of ['vendor/three.module.js', 'vendor/three.core.js']) {
+  if (existsSync(join(gameDir, bad))) {
+    fail('forbidden vendored file present: game/' + bad +
+      ' — use the minified vendor/three.min.js instead');
   }
-  return out.sort((a, b) => (a.path < b.path ? -1 : 1));
 }
 
-function main(): void {
-  const missing = REQUIRED_FILES.filter((f) => !existsSync(join(REPO, f)));
-  if (missing.length > 0) {
-    console.error(`main.ts: file game hilang: ${missing.join(", ")}`);
-    process.exit(1);
-  }
-  const files = listFiles(REPO, "");
-  const gameFiles = files.filter((f) => f.path.startsWith("game/"));
-  const totalBytes = gameFiles.reduce((sum, f) => sum + f.bytes, 0);
-
-  const dossier = {
-    name: "Tallow Point",
-    competition: "gta6-01",
-    round: 5,
-    entry: "game/index.html",
-    engine: "three.js 0.187.0 (vendored, tanpa network)",
-    gameFiles,
-    gameTotalBytes: totalBytes,
-    screenshots: [
-      "game/screenshots/1-start.png",
-      "game/screenshots/2-city.png",
-      "game/screenshots/3-chase.png",
-      "game/screenshots/4-police.png",
-    ],
-    notes:
-      "R5-1: fondasi + kamera chase third-person + lighting golden-hour. " +
-      "R5-2: gameplay inti — pemain jalan kaki, mengemudi + carjacking, " +
-      "lalu lintas + pejalan kaki AI, HUD + minimap. " +
-      "R5-3: polisi & misi — wanted 1-5, cruiser kejar + roadblock + " +
-      "helikopter, BUSTED/DEAD + respawn, 5 misi cerita, combat, save, " +
-      "audio WebAudio, juice (partikel, strobo, flash). " +
-      "R5-4: polish visual — cruiser flanking (terlihat di frame), heli " +
-      "di depan pemain + kamera menengadah, roadblock + cone, staging " +
-      "pembuka wanted 2 + auto-drive, menu awal, 4 screenshot final " +
-      "1280x720 (<=256 KiB) + dossier final.",
-  };
-
-  mkdirSync(OUT, { recursive: true });
-  writeFileSync(join(OUT, "dossier.json"), JSON.stringify(dossier, null, 2) + "\n");
-  console.log(`main.ts: OK — ${gameFiles.length} file game, ${totalBytes} byte -> ${join(OUT, "dossier.json")}`);
+// 2. The minified three.js must exist and stay small.
+const threeMin = join(gameDir, 'vendor', 'three.min.js');
+if (!existsSync(threeMin)) fail('missing game/vendor/three.min.js');
+const threeBytes = statSync(threeMin).size;
+if (threeBytes >= 1024 * 1024) {
+  fail('game/vendor/three.min.js is ' + threeBytes + ' bytes (>= 1 MiB)');
 }
 
-main();
+// 3. The game entry point must exist.
+if (!existsSync(join(gameDir, 'index.html'))) fail('missing game/index.html');
+
+// 4. Screenshots: 3 or 4 PNGs, each at most 256 KiB.
+if (!existsSync(shotDir)) fail('missing screenshots/ directory');
+const shots = readdirSync(shotDir).filter((f) => f.endsWith('.png')).sort();
+if (shots.length < 3 || shots.length > 4) {
+  fail('expected 3 or 4 screenshots, found ' + shots.length);
+}
+for (const shot of shots) {
+  const size = statSync(join(shotDir, shot)).size;
+  if (size > 262144) fail('screenshot ' + shot + ' is ' + size + ' bytes (> 256 KiB)');
+}
+
+// 5. Hand the game in.
+mkdirSync(out, { recursive: true });
+cpSync(gameDir, join(out, 'game'), { recursive: true });
+mkdirSync(join(out, 'screenshots'), { recursive: true });
+cpSync(shotDir, join(out, 'screenshots'), { recursive: true });
+
+// The scorer's own caps (reference/gate.json): only text_max_bytes shapes
+// the bytes; the others refuse an entry the scorer would refuse (more than
+// 4 screenshots or one over 256 KiB; more than 993 files in game/ or 48 MiB
+// of game files, in all, or a path under game/ over 1000 bytes).
+writeFileSync(
+  join(out, 'dossier.json'),
+  buildDossier(out, {
+    text_max_bytes: 163840,
+    screenshots: { max: 4, max_bytes: 262144 },
+    game_max_files: 993,
+    game_max_bytes: 50331648,
+    game_path_max_bytes: 1000,
+  }),
+);
+
+console.log('dossier written: ' + shots.length + ' screenshots, three.min.js ' +
+  threeBytes + ' bytes, game/ handed in.');

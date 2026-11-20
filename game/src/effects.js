@@ -1,147 +1,96 @@
-// Tallow Point — effects.js
-// Partikel percikan / asap (game-feel) + flash layar saat tertembak.
-// Ditulis fresh dari R5_SPEC_2026-11-19.md + R4_SPEC_2026-11-19.md (R5-3).
-// - Satu pool THREE.Points (240 partikel) dipakai ulang semua ledakan —
-//   tanpa alokasi per frame, tanpa tekstur, tanpa network.
-// - Partikel mati diparkir di y = -999. Warna memudar seiring umur.
-// - Flash merah layar diurus HUD (DOM); modul ini hanya memicu lewat
-//   callback onDamageFlash yang dipasang main.js.
+// effects.js — juice: spark particles on crashes, skid marks, debris puffs,
+// a muzzle flash and a damage vignette flash. All visual-only, pooled so
+// nothing allocates per frame. Classic script, namespace TP.
+window.TP = window.TP || {};
+(function (TP) {
+  'use strict';
 
-import * as THREE from "three";
+  var MAX_PARTICLES = 240;
 
-const MAX_PARTICLES = 240;
-
-export class Effects {
-  constructor(scene) {
-    this.scene = scene;
-    this.positions = new Float32Array(MAX_PARTICLES * 3);
-    this.colors = new Float32Array(MAX_PARTICLES * 3);
-    this.vel = new Float32Array(MAX_PARTICLES * 3);
-    this.life = new Float32Array(MAX_PARTICLES); // sisa umur, detik.
-    this.maxLife = new Float32Array(MAX_PARTICLES);
-    this.baseColor = new Float32Array(MAX_PARTICLES * 3);
-    this.gravity = new Float32Array(MAX_PARTICLES);
-    this.cursor = 0;
-    for (let i = 0; i < MAX_PARTICLES; i++) {
-      this.positions[i * 3 + 1] = -999;
-    }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute("position", new THREE.BufferAttribute(this.positions, 3));
-    geo.setAttribute("color", new THREE.BufferAttribute(this.colors, 3));
-    const mat = new THREE.PointsMaterial({
-      size: 0.4,
-      vertexColors: true,
-      transparent: true,
-      opacity: 0.95,
+  function createEffects(scene) {
+    var geo = new THREE.BufferGeometry();
+    var pos = new Float32Array(MAX_PARTICLES * 3);
+    var col = new Float32Array(MAX_PARTICLES * 3);
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    var mat = new THREE.PointsMaterial({
+      size: 0.5, vertexColors: true, transparent: true, opacity: 0.95,
       depthWrite: false,
     });
-    this.points = new THREE.Points(geo, mat);
-    this.points.frustumCulled = false;
-    this.points.name = "effects-particles";
-    scene.add(this.points);
-  }
+    var points = new THREE.Points(geo, mat);
+    points.frustumCulled = false;
+    scene.add(points);
 
-  // Ledakan kecil di satu titik. opts: count, color (hex), speed, up,
-  // life (detik), gravity (m/s^2, positif = jatuh).
-  burst(x, y, z, opts) {
-    const o = opts || {};
-    const count = o.count || 10;
-    const speed = o.speed || 6;
-    const up = o.up === undefined ? 3 : o.up;
-    const life = o.life || 0.6;
-    const gravity = o.gravity === undefined ? 12 : o.gravity;
-    const col = new THREE.Color(o.color === undefined ? 0xffa040 : o.color);
-    for (let n = 0; n < count; n++) {
-      const i = this.cursor;
-      this.cursor = (this.cursor + 1) % MAX_PARTICLES;
-      const i3 = i * 3;
-      this.positions[i3] = x;
-      this.positions[i3 + 1] = y;
-      this.positions[i3 + 2] = z;
-      // Arah acak di bidang XZ + komponen naik.
-      const a = Math.random() * Math.PI * 2;
-      const r = speed * (0.4 + Math.random() * 0.6);
-      this.vel[i3] = Math.cos(a) * r;
-      this.vel[i3 + 1] = up * (0.4 + Math.random() * 0.8);
-      this.vel[i3 + 2] = Math.sin(a) * r;
-      this.life[i] = life * (0.6 + Math.random() * 0.7);
-      this.maxLife[i] = this.life[i];
-      this.baseColor[i3] = col.r;
-      this.baseColor[i3 + 1] = col.g;
-      this.baseColor[i3 + 2] = col.b;
-      this.gravity[i] = gravity;
+    var parts = [];
+    for (var i = 0; i < MAX_PARTICLES; i++) {
+      parts.push({ alive: false, x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, life: 0, max: 1 });
+      pos[i * 3 + 1] = -100; // park dead particles underground
     }
-    this.points.geometry.attributes.position.needsUpdate = true;
-    this.points.geometry.attributes.color.needsUpdate = true;
-  }
 
-  // Percikan tabrakan: oranye terang, cepat, jatuh.
-  impactSparks(x, y, z, strength) {
-    this.burst(x, y + 0.6, z, {
-      count: Math.round(8 + strength),
-      color: 0xffb040,
-      speed: 5 + strength * 0.4,
-      up: 3.5,
-      life: 0.55,
-      gravity: 14,
-    });
-  }
+    var flashEl = null;
 
-  // Asap dari cruiser yang lumpuh: abu-abu, lambat, naik.
-  smokePuff(x, y, z) {
-    this.burst(x, y + 1.0, z, {
-      count: 5,
-      color: 0x555555,
-      speed: 1.2,
-      up: 2.2,
-      life: 1.4,
-      gravity: -1.5, // negatif = naik.
-    });
-  }
-
-  // Kilau emas saat misi selesai: naik, lambat, hangat.
-  goldBurst(x, y, z) {
-    this.burst(x, y + 1.2, z, {
-      count: 26,
-      color: 0xffd23e,
-      speed: 3.5,
-      up: 4.5,
-      life: 1.1,
-      gravity: 4,
-    });
-  }
-
-  update(dt) {
-    let any = false;
-    for (let i = 0; i < MAX_PARTICLES; i++) {
-      if (this.life[i] <= 0) continue;
-      any = true;
-      this.life[i] -= dt;
-      const i3 = i * 3;
-      if (this.life[i] <= 0) {
-        this.positions[i3 + 1] = -999;
-        this.colors[i3] = 0;
-        this.colors[i3 + 1] = 0;
-        this.colors[i3 + 2] = 0;
-        continue;
+    function spawn(x, y, z, n, color, speed, up) {
+      var made = 0;
+      for (var i = 0; i < MAX_PARTICLES && made < n; i++) {
+        var p = parts[i];
+        if (p.alive) continue;
+        p.alive = true;
+        p.x = x; p.y = y; p.z = z;
+        var a = Math.random() * Math.PI * 2;
+        var s = speed * (0.4 + Math.random() * 0.8);
+        p.vx = Math.cos(a) * s;
+        p.vz = Math.sin(a) * s;
+        p.vy = (up || 3) * Math.random();
+        p.life = 0; p.max = 0.4 + Math.random() * 0.5;
+        col[i * 3] = ((color >> 16) & 255) / 255;
+        col[i * 3 + 1] = ((color >> 8) & 255) / 255;
+        col[i * 3 + 2] = (color & 255) / 255;
+        made++;
       }
-      this.vel[i3 + 1] -= this.gravity[i] * dt;
-      this.positions[i3] += this.vel[i3] * dt;
-      this.positions[i3 + 1] += this.vel[i3 + 1] * dt;
-      this.positions[i3 + 2] += this.vel[i3 + 2] * dt;
-      if (this.positions[i3 + 1] < 0.05) {
-        this.positions[i3 + 1] = 0.05;
-        this.vel[i3 + 1] *= -0.3; // pantul kecil di tanah.
+      geo.attributes.color.needsUpdate = true;
+    }
+
+    function update(dt) {
+      for (var i = 0; i < MAX_PARTICLES; i++) {
+        var p = parts[i];
+        if (!p.alive) continue;
+        p.life += dt;
+        if (p.life >= p.max) {
+          p.alive = false;
+          pos[i * 3 + 1] = -100;
+          continue;
+        }
+        p.vy -= 12 * dt;
+        p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
+        if (p.y < 0.05) { p.y = 0.05; p.vy = 0; }
+        pos[i * 3] = p.x; pos[i * 3 + 1] = p.y; pos[i * 3 + 2] = p.z;
       }
-      // Memudar seiring umur.
-      const f = this.life[i] / this.maxLife[i];
-      this.colors[i3] = this.baseColor[i3] * f;
-      this.colors[i3 + 1] = this.baseColor[i3 + 1] * f;
-      this.colors[i3 + 2] = this.baseColor[i3 + 2] * f;
+      geo.attributes.position.needsUpdate = true;
     }
-    if (any) {
-      this.points.geometry.attributes.position.needsUpdate = true;
-      this.points.geometry.attributes.color.needsUpdate = true;
+
+    function sparks(x, y, z) { spawn(x, y, z, 14, 0xffc860, 7, 4); }
+    function debris(x, y, z) { spawn(x, y, z, 22, 0x8a7a6a, 5, 3); }
+    function muzzle(x, y, z) { spawn(x, y, z, 6, 0xfff2a8, 10, 1); }
+
+    // Red flash overlay for damage feedback (DOM, fades fast).
+    function damageFlash() {
+      if (!flashEl) {
+        flashEl = document.createElement('div');
+        flashEl.style.cssText = 'position:absolute;inset:0;pointer-events:none;' +
+          'background:radial-gradient(ellipse at center,transparent 55%,rgba(200,0,0,0.45));' +
+          'opacity:0;transition:opacity 0.12s;z-index:5';
+        var wrap = document.getElementById('game-wrap') || document.body;
+        wrap.appendChild(flashEl);
+      }
+      flashEl.style.opacity = '1';
+      setTimeout(function () { if (flashEl) flashEl.style.opacity = '0'; }, 130);
     }
+
+    return {
+      update: update, sparks: sparks, debris: debris,
+      muzzle: muzzle, damageFlash: damageFlash,
+    };
   }
-}
+
+  TP.Effects = { create: createEffects };
+})(window.TP);

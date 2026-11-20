@@ -1,50 +1,37 @@
-// Tallow Point — random.js
-// RNG deterministik (mulberry32) + helper. Kota yang sama selalu muncul
-// dari seed yang sama — penting supaya screenshot dan replay konsisten.
+// random.js — deterministic RNG (mulberry32) + helpers. Seed from URL (?seed=)
+// so screenshots reproduce exactly. Classic script, namespace TP.
+window.TP = window.TP || {};
+(function (TP) {
+  'use strict';
 
-export function mulberry32(seed) {
-  let a = seed >>> 0;
-  return function next() {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
+  function mulberry32(seed) {
+    var a = seed >>> 0;
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      var t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
 
-// RNG kecil dengan helper. Satu instance per subsistem supaya urutan
-// pemakaian tidak saling menggeser (kota, lalu lintas, pejalan kaki).
-export function makeRng(seed) {
-  const next = mulberry32(seed);
-  return {
-    next,
-    // Float di [min, max).
-    range(min, max) {
-      return min + next() * (max - min);
-    },
-    // Integer di [min, max] (inklusif).
-    int(min, max) {
-      return Math.floor(min + next() * (max - min + 1));
-    },
-    // Ambil satu elemen array.
-    pick(arr) {
-      return arr[Math.floor(next() * arr.length)];
-    },
-    // true dengan peluang p (0..1).
-    chance(p) {
-      return next() < p;
-    },
-    // Acak urutan array (Fisher-Yates), kembalikan array baru.
-    shuffle(arr) {
-      const out = arr.slice();
-      for (let i = out.length - 1; i > 0; i--) {
-        const j = Math.floor(next() * (i + 1));
-        const tmp = out[i];
-        out[i] = out[j];
-        out[j] = tmp;
-      }
-      return out;
-    },
-  };
-}
+  function makeRng(seed) {
+    var next = mulberry32(seed);
+    return {
+      next: next,
+      range: function (lo, hi) { return lo + next() * (hi - lo); },
+      int: function (lo, hi) { return Math.floor(lo + next() * (hi - lo + 1)); },
+      pick: function (arr) { return arr[Math.floor(next() * arr.length)]; },
+      chance: function (p) { return next() < p; },
+    };
+  }
+
+  // Seed from the query string (?seed=1) or the default 1337.
+  function seedFromUrl() {
+    try {
+      var m = /[?&]seed=(\d+)/.exec(window.location.search || '');
+      return m ? parseInt(m[1], 10) : 1337;
+    } catch (e) { return 1337; }
+  }
+
+  TP.RNG = { makeRng: makeRng, seedFromUrl: seedFromUrl, mulberry32: mulberry32 };
+})(window.TP);

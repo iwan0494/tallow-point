@@ -1,131 +1,107 @@
-// Tallow Point — player.js
-// Pemain jalan kaki: mesh karakter + kontrol kamera-relatif + tabrakan.
-// Ditulis fresh dari R5_SPEC_2026-11-19.md + R4_SPEC_2026-11-19.md (R5-2).
-// Gerak relatif terhadap yaw kamera (W = menjauhi kamera). Badan berputar
-// halus ke arah gerak; kaki mengayun saat berjalan (animasi sederhana).
+// player.js — the on-foot character: WASD movement, run, jump, a simple
+// walk-cycle bob, and carjacking (enter/exit). Exiting a car parks it in
+// parkedCars so the player can steal it back again. Classic script, TP.
+window.TP = window.TP || {};
+(function (TP) {
+  'use strict';
 
-import * as THREE from "three";
-import { PLAYER } from "./config.js";
-import { resolveCircleVsBuildings, clampToCity, turnToward } from "./physics.js";
+  var cfg = TP.Config;
 
-const RADIUS = 0.45; // tabrakan lingkaran pemain.
+  function createPlayer(scene) {
+    var group = new THREE.Group();
+    group.name = 'player';
 
-// Karakter sederhana tapi terbaca dari kamera chase: jaket oranye terang,
-// celana gelap, kepala + topi. Tinggi ~1,8 m.
-export function makePlayerMesh(THREE) {
-  const g = new THREE.Group();
-  g.name = "player";
-  const jacket = new THREE.MeshStandardMaterial({ color: 0xff7b2f, roughness: 0.7 });
-  const denim = new THREE.MeshStandardMaterial({ color: 0x2a3550, roughness: 0.85 });
-  const skin = new THREE.MeshStandardMaterial({ color: 0xd9a077, roughness: 0.6 });
-  const cap = new THREE.MeshStandardMaterial({ color: 0x1e2a3a, roughness: 0.6 });
+    var bodyMat = new THREE.MeshStandardMaterial({ color: 0x2a6db0, roughness: 0.7 });
+    var skinMat = new THREE.MeshStandardMaterial({ color: 0xd8a075, roughness: 0.8 });
+    var pantsMat = new THREE.MeshStandardMaterial({ color: 0x2e2a26, roughness: 0.85 });
 
-  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.62, 0.3), jacket);
-  torso.position.y = 1.12;
-  torso.castShadow = true;
-  g.add(torso);
+    var torso = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.9, 0.4), bodyMat);
+    torso.position.y = 1.05; torso.castShadow = true;
+    var head = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.42, 0.42), skinMat);
+    head.position.y = 1.75; head.castShadow = true;
+    var legL = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.7, 0.3), pantsMat);
+    legL.position.set(-0.18, 0.35, 0); legL.castShadow = true;
+    var legR = legL.clone();
+    legR.position.x = 0.18;
+    var armL = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.7, 0.24), bodyMat);
+    armL.position.set(-0.48, 1.05, 0); armL.castShadow = true;
+    var armR = armL.clone();
+    armR.position.x = 0.48;
 
-  const head = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.32, 0.32), skin);
-  head.position.y = 1.62;
-  head.castShadow = true;
-  g.add(head);
-  const hat = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.1, 0.36), cap);
-  hat.position.y = 1.8;
-  g.add(hat);
+    group.add(torso); group.add(head);
+    group.add(legL); group.add(legR); group.add(armL); group.add(armR);
+    scene.add(group);
 
-  const legGeo = new THREE.BoxGeometry(0.2, 0.78, 0.22);
-  const legL = new THREE.Mesh(legGeo, denim);
-  legL.position.set(-0.14, 0.39, 0);
-  legL.castShadow = true;
-  const legR = new THREE.Mesh(legGeo, denim);
-  legR.position.set(0.14, 0.39, 0);
-  legR.castShadow = true;
-  g.add(legL);
-  g.add(legR);
+    var state = {
+      pos: new THREE.Vector3(25, 0, -40),
+      heading: 0,
+      speed: 0,
+      walking: false,
+      driving: null,      // vehicle object when driving, else null
+      walkPhase: 0,
+    };
 
-  const armGeo = new THREE.BoxGeometry(0.15, 0.58, 0.18);
-  const armL = new THREE.Mesh(armGeo, jacket);
-  armL.position.set(-0.34, 1.12, 0);
-  const armR = new THREE.Mesh(armGeo, jacket);
-  armR.position.set(0.34, 1.12, 0);
-  g.add(armL);
-  g.add(armR);
-
-  return { group: g, legL, legR, armL, armR };
-}
-
-export class Player {
-  constructor(THREE) {
-    const parts = makePlayerMesh(THREE);
-    this.mesh = parts.group;
-    this.legL = parts.legL;
-    this.legR = parts.legR;
-    this.armL = parts.armL;
-    this.armR = parts.armR;
-    this.pos = this.mesh.position; // Vector3, y selalu 0.
-    this.heading = Math.PI; // menghadap -Z di awal (seperti mobil R5-1).
-    this.speed = 0;
-    this.walkPhase = 0;
-  }
-
-  place(x, z, heading) {
-    this.pos.set(x, 0, z);
-    this.heading = heading;
-    this.speed = 0;
-    this.mesh.rotation.y = heading;
-  }
-
-  // dt: detik. move: {x,z} kamera-relatif dari input, atau null.
-  // camYaw: yaw kamera (radian, 0 = +Z). buildingBoxes: AABB gedung.
-  // carCircles: [{x, z, r}] mobil yang tidak boleh ditembus.
-  update(dt, move, camYaw, buildingBoxes, carCircles) {
-    let targetSpeed = 0;
-    if (move) {
-      // Kamera-relatif: maju (W) = menjauhi kamera, kanan (D) = kanan kamera.
-      const sin = Math.sin(camYaw);
-      const cos = Math.cos(camYaw);
-      const wx = sin * move.z + cos * move.x;
-      const wz = cos * move.z - sin * move.x;
-      const desired = Math.atan2(wx, wz);
-      this.heading = turnToward(this.heading, desired, 9.0 * dt);
-      targetSpeed = PLAYER.walkSpeed;
-      this._moveX = wx;
-      this._moveZ = wz;
-    } else {
-      this._moveX = 0;
-      this._moveZ = 0;
-    }
-    // Akselerasi / deselerasi halus (tidak langsung berhenti).
-    const rate = targetSpeed > this.speed ? 14 : 18;
-    this.speed += Math.max(-rate * dt, Math.min(rate * dt, targetSpeed - this.speed));
-    if (this.speed > 0.05) {
-      this.pos.x += Math.sin(this.heading) * this.speed * dt;
-      this.pos.z += Math.cos(this.heading) * this.speed * dt;
-    }
-    resolveCircleVsBuildings(this.pos, RADIUS, buildingBoxes);
-    if (carCircles) {
-      for (const c of carCircles) {
-        const dx = this.pos.x - c.x;
-        const dz = this.pos.z - c.z;
-        const d = Math.hypot(dx, dz);
-        const min = RADIUS + c.r;
-        if (d < min && d > 1e-6) {
-          this.pos.x += (dx / d) * (min - d);
-          this.pos.z += (dz / d) * (min - d);
-        }
+    function update(dt, input, city, heading) {
+      if (state.driving) return;
+      var ax = input.axis();
+      var moving = ax.forward !== 0 || ax.steer !== 0;
+      state.walking = moving;
+      var sp = ax.run ? cfg.playerRun : cfg.playerSpeed;
+      if (moving) {
+        // Turn with A/D, move with W/S relative to the camera heading.
+        state.heading = heading + (ax.steer !== 0 ? -ax.steer * 2.4 * dt : 0);
+        var fwd = ax.forward;
+        var nx = state.pos.x + Math.sin(state.heading) * fwd * sp * dt;
+        var nz = state.pos.z + Math.cos(state.heading) * fwd * sp * dt;
+        var probe = { x: nx, z: nz };
+        TP.Physics.collideCircle(probe, 0.6, city.colliders);
+        state.pos.x = probe.x; state.pos.z = probe.z;
+        state.speed = sp * Math.abs(fwd);
+        state.walkPhase += dt * sp * 1.6;
+      } else {
+        state.speed = 0;
       }
+      group.position.copy(state.pos);
+      group.rotation.y = state.heading;
+      // Walk cycle: legs + arms swing, body bobs.
+      var sw = state.walking ? Math.sin(state.walkPhase) * 0.5 : 0;
+      legL.rotation.x = sw; legR.rotation.x = -sw;
+      armL.rotation.x = -sw * 0.7; armR.rotation.x = sw * 0.7;
+      torso.position.y = 1.05 + (state.walking ? Math.abs(Math.sin(state.walkPhase)) * 0.06 : 0);
     }
-    clampToCity(this.pos, 4);
 
-    // Animasi jalan: kaki + lengan mengayun sebanding dengan kecepatan.
-    this.mesh.rotation.y = this.heading;
-    const swing = this.speed > 0.2;
-    this.walkPhase += dt * this.speed * 2.1;
-    const amp = swing ? Math.min(0.55, this.speed * 0.09) : 0;
-    const s = Math.sin(this.walkPhase) * amp;
-    this.legL.rotation.x = s;
-    this.legR.rotation.x = -s;
-    this.armL.rotation.x = -s * 0.7;
-    this.armR.rotation.x = s * 0.7;
+    // Leave the car: the car becomes a parked, stealable car again, so the
+    // player can get back into their own coupe (earlier builds lost it).
+    function exitCar(parkedCars) {
+      if (!state.driving) return null;
+      var car = state.driving;
+      state.driving = null;
+      car.parked = true;
+      if (parkedCars && parkedCars.indexOf(car) === -1) parkedCars.push(car);
+      // Step out to the side of the car.
+      state.pos.set(
+        car.pos.x + Math.cos(car.heading) * 2.2,
+        0,
+        car.pos.z - Math.sin(car.heading) * 2.2
+      );
+      state.heading = car.heading;
+      group.position.copy(state.pos);
+      group.visible = true;
+      return car;
+    }
+
+    function enterCar(car) {
+      state.driving = car;
+      car.parked = false;
+      group.visible = false;
+      state.pos.set(car.pos.x, 0, car.pos.z);
+    }
+
+    return {
+      group: group, state: state, update: update,
+      exitCar: exitCar, enterCar: enterCar,
+    };
   }
-}
+
+  TP.Player = { create: createPlayer };
+})(window.TP);
