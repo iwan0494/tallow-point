@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tallow Point — sun-soaked open-world crime</title>
+<style>
+  :root {
+    --gold: #ffc21a;
+    --gold-dim: #c98a1b;
+    --ink: #0d0f14;
+    --panel: rgba(10, 12, 18, 0.78);
+    --panel-line: rgba(255, 194, 26, 0.35);
+    --text: #f4f1e8;
+    --muted: #b9b4a6;
+    --red: #ff3b30;
+    --blue: #3b82f6;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #14100c; }
+  body { font-family: "Segoe UI", system-ui, -apple-system, Arial, sans-serif; color: var(--text); }
+  #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  #status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+  /* ---------- HUD ---------- */
+  #hud { position: fixed; inset: 0; pointer-events: none; font-size: 13px; z-index: 5; }
+  #hud.hidden { display: none; }
+  .panel { background: var(--panel); border: 1px solid var(--panel-line); border-radius: 8px; padding: 8px 10px; backdrop-filter: blur(2px); }
+  .label { font-size: 10px; letter-spacing: 0.14em; color: var(--muted); font-weight: 700; }
+
+  #hud-topleft { position: absolute; top: 12px; left: 12px; display: flex; flex-direction: column; gap: 6px; width: 250px; }
+  #stars { font-size: 22px; letter-spacing: 2px; color: var(--gold); text-shadow: 0 2px 6px rgba(0,0,0,0.8); line-height: 1; }
+  #stars.hot { color: var(--red); }
+  #wanted-label { font-size: 11px; font-weight: 800; letter-spacing: 0.12em; }
+  #cash-row { display: flex; justify-content: space-between; align-items: baseline; }
+  #cash { font-size: 22px; font-weight: 800; color: #7ee787; }
+  #clock { font-size: 15px; font-weight: 700; color: var(--text); }
+  #district-name { font-size: 16px; font-weight: 800; letter-spacing: 0.06em; }
+  #district-sub { font-size: 11px; color: var(--muted); letter-spacing: 0.1em; }
+  .bar { height: 6px; background: rgba(255,255,255,0.16); border-radius: 3px; overflow: hidden; margin-top: 5px; }
+  .bar > i { display: block; height: 100%; background: var(--gold); border-radius: 3px; }
+  #district-standing-text { font-size: 11px; font-weight: 700; color: var(--gold); margin-top: 3px; }
+
+  #mission-panel { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); width: 430px; text-align: center; border-color: rgba(255,194,26,0.6); }
+  #mission-panel.idle { opacity: 0.85; }
+  #mission-number { font-size: 11px; letter-spacing: 0.2em; color: var(--gold); font-weight: 800; }
+  #mission-name { font-size: 21px; font-weight: 900; letter-spacing: 0.04em; line-height: 1.1; }
+  #mission-stage { font-size: 11px; letter-spacing: 0.14em; color: var(--muted); font-weight: 700; margin-top: 2px; }
+  #mission-objective { font-size: 13px; margin-top: 3px; }
+  #mission-meta { display: flex; justify-content: center; gap: 18px; margin-top: 4px; font-weight: 800; }
+  #mission-timer { color: var(--gold); font-size: 16px; }
+  #mission-payout { color: #7ee787; font-size: 16px; }
+
+  #dispatch-board { position: absolute; top: 12px; right: 12px; width: 268px; }
+  #dispatch-count { font-size: 11px; font-weight: 800; letter-spacing: 0.08em; color: #ffb3ad; margin-bottom: 5px; }
+  .dispatch-row { display: flex; gap: 8px; font-size: 12px; padding: 3px 0; border-top: 1px solid rgba(255,255,255,0.08); }
+  .dispatch-row b { color: var(--gold); min-width: 78px; }
+  .dispatch-row span { flex: 1; color: var(--text); }
+  .dispatch-row i { font-style: normal; color: var(--muted); font-weight: 700; }
+  .dispatch-row.quiet b { color: var(--muted); }
+
+  #hud-bottomleft { position: absolute; left: 12px; bottom: 12px; display: flex; flex-direction: column; gap: 6px; width: 268px; }
+  .vitals .bar { height: 9px; }
+  #life-fill { background: #37c978; }
+  #armor-fill { background: #3b82f6; }
+  .vitals .row { display: flex; justify-content: space-between; font-size: 11px; font-weight: 700; margin-top: 4px; }
+  #weapon-box { display: flex; align-items: center; gap: 10px; }
+  #weapon-icon { font-size: 24px; }
+  #weapon-name { font-size: 15px; font-weight: 800; }
+  #weapon-ammo { font-size: 11px; color: var(--muted); font-weight: 700; }
+  #weapon-list { display: flex; gap: 4px; margin-top: 6px; }
+  .weapon-slot { flex: 1; border: 1px solid rgba(255,255,255,0.18); border-radius: 5px; padding: 4px 5px; font-size: 10px; text-align: center; opacity: 0.75; }
+  .weapon-slot b { display: block; font-size: 10px; }
+  .weapon-slot span { color: var(--muted); }
+  .weapon-slot.active { border-color: var(--gold); opacity: 1; background: rgba(255,194,26,0.12); }
+  .weapon-slot.locked span { color: #ff9d9d; }
+  #car-box { display: flex; justify-content: space-between; align-items: baseline; }
+  #car-name { font-size: 15px; font-weight: 800; color: var(--gold); }
+  #car-condition { font-size: 12px; font-weight: 700; }
+  #respect-row { display: flex; justify-content: space-between; font-size: 11px; font-weight: 800; }
+  #respect-rank { color: var(--gold); }
+  #respect-fill { background: linear-gradient(90deg, #c98a1b, var(--gold)); }
+
+  #hud-bottomcenter { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); width: 470px; display: flex; flex-direction: column; gap: 6px; }
+  #crew-row { display: flex; gap: 6px; }
+  .crew-card { flex: 1; display: flex; gap: 6px; align-items: center; background: var(--panel); border: 1px solid rgba(255,255,255,0.14); border-radius: 7px; padding: 5px 6px; }
+  .crew-meta b { display: block; font-size: 11px; }
+  .crew-meta span { font-size: 9px; color: var(--muted); letter-spacing: 0.04em; }
+  .portrait { width: 34px; height: 34px; min-width: 34px; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-weight: 900; font-size: 13px; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,0.6); }
+  #fixer-card { display: flex; gap: 10px; align-items: center; }
+  #fixer-card .portrait { width: 46px; height: 46px; min-width: 46px; font-size: 17px; }
+  #fixer-name { font-size: 11px; font-weight: 800; letter-spacing: 0.08em; color: var(--gold); }
+  #fixer-dialog { font-size: 14px; font-style: italic; margin-top: 2px; }
+
+  #hud-bottomright { position: absolute; right: 12px; bottom: 12px; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+  #minimap { width: 190px; height: 190px; border-radius: 8px; border: 1px solid var(--panel-line); background: #0d0f14; }
+  #speed-box { display: flex; align-items: baseline; gap: 6px; }
+  #speed { font-size: 30px; font-weight: 900; line-height: 1; }
+  #speed-unit { font-size: 11px; color: var(--muted); font-weight: 700; }
+  #radio-line { font-size: 11px; color: var(--muted); font-weight: 700; letter-spacing: 0.05em; }
+
+  #prompt { position: absolute; left: 50%; top: 58%; transform: translateX(-50%); background: rgba(10,12,18,0.85); border: 1px solid var(--gold); color: var(--text); font-weight: 700; font-size: 14px; padding: 8px 16px; border-radius: 8px; opacity: 0; transition: opacity 0.15s; }
+  #prompt.show { opacity: 1; }
+  #toast { position: absolute; left: 50%; top: 128px; transform: translateX(-50%); background: rgba(10,12,18,0.88); border: 1px solid rgba(255,255,255,0.25); font-weight: 700; font-size: 14px; padding: 9px 18px; border-radius: 8px; opacity: 0; transition: opacity 0.2s; white-space: nowrap; max-width: 90vw; overflow: hidden; text-overflow: ellipsis; }
+  #toast.show { opacity: 1; }
+  #crosshair { position: absolute; left: 50%; top: 50%; width: 18px; height: 18px; margin: -9px 0 0 -9px; opacity: 0; }
+  #crosshair.show { opacity: 0.9; }
+  #crosshair::before, #crosshair::after { content: ""; position: absolute; background: #fff; box-shadow: 0 0 3px #000; }
+  #crosshair::before { left: 8px; top: 0; width: 2px; height: 18px; }
+  #crosshair::after { left: 0; top: 8px; width: 18px; height: 2px; }
+
+  /* ---------- Screens ---------- */
+  .screen { position: fixed; inset: 0; display: none; z-index: 10; }
+  .screen.show { display: flex; }
+  .screen-inner { margin: auto; width: min(1060px, 94vw); }
+
+  #screen-title { background: linear-gradient(180deg, rgba(8,6,16,0.25) 0%, rgba(8,6,16,0.55) 55%, rgba(8,6,16,0.88) 100%); flex-direction: column; align-items: center; justify-content: center; text-align: center; }
+  #screen-title.show { display: flex; }
+  .title-kicker { letter-spacing: 0.42em; font-size: 13px; font-weight: 800; color: var(--gold); }
+  h1.title { margin: 8px 0 0; font-size: 96px; line-height: 0.95; font-weight: 900; letter-spacing: 0.02em;
+    background: linear-gradient(180deg, #fff6c9 8%, var(--gold) 45%, #ff7a2f 90%);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+    text-shadow: 0 6px 30px rgba(0,0,0,0.45); font-family: Impact, "Arial Black", sans-serif; }
+  .title-tag { margin-top: 10px; font-size: 17px; letter-spacing: 0.18em; font-weight: 700; color: #fff; text-shadow: 0 2px 8px rgba(0,0,0,0.8); }
+  .title-menu { margin-top: 34px; display: flex; flex-direction: column; gap: 10px; width: 340px; }
+  .menu-btn { pointer-events: auto; cursor: pointer; background: rgba(10,12,18,0.85); color: var(--text); border: 1px solid rgba(255,194,26,0.5); border-radius: 8px; padding: 13px 18px; font-size: 15px; font-weight: 800; letter-spacing: 0.1em; text-align: left; }
+  .menu-btn:hover { background: var(--gold); color: #14100c; }
+  .menu-btn.primary { background: var(--gold); color: #14100c; border-color: var(--gold); }
+  .menu-btn.primary:hover { background: #ffd34d; }
+  #title-save-slot { margin-top: 8px; font-size: 12px; color: var(--muted); letter-spacing: 0.08em; font-weight: 700; }
+  .title-footer { position: absolute; bottom: 18px; left: 0; right: 0; text-align: center; font-size: 12px; letter-spacing: 0.14em; color: rgba(255,255,255,0.85); font-weight: 700; text-shadow: 0 1px 4px #000; }
+
+  #screen-map { background: rgba(6, 8, 14, 0.92); }
+  #screen-map .screen-inner { padding: 26px 0; }
+  .map-head { display: flex; justify-content: space-between; align-items: baseline; }
+  .map-head h2 { margin: 0; font-size: 30px; font-weight: 900; letter-spacing: 0.04em; }
+  .map-head span { color: var(--gold); font-weight: 800; letter-spacing: 0.12em; font-size: 12px; }
+  #map-stats { display: flex; gap: 22px; flex-wrap: wrap; margin: 14px 0; padding: 10px 14px; background: var(--panel); border: 1px solid var(--panel-line); border-radius: 8px; font-size: 13px; }
+  #map-stats b { color: var(--gold); }
+  .map-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  #map-districts { display: flex; flex-direction: column; gap: 8px; }
+  .map-district { background: var(--panel); border: 1px solid var(--ac, rgba(255,255,255,0.2)); border-left: 5px solid var(--ac, #fff); border-radius: 8px; padding: 9px 12px; }
+  .map-district-head { display: flex; justify-content: space-between; }
+  .map-district-head b { font-size: 15px; letter-spacing: 0.05em; }
+  .map-district-head span { font-size: 11px; color: var(--muted); letter-spacing: 0.1em; }
+  .map-district-blurb { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .map-district .standing { height: 6px; background: rgba(255,255,255,0.14); border-radius: 3px; margin-top: 6px; overflow: hidden; }
+  .map-district .standing i { display: block; height: 100%; background: var(--ac, #fff); }
+  .standing-text { font-size: 11px; font-weight: 800; color: var(--gold); margin-top: 3px; }
+  #map-missions { display: flex; flex-direction: column; gap: 8px; }
+  .map-mission { display: flex; gap: 10px; align-items: center; background: var(--panel); border: 1px solid rgba(255,255,255,0.14); border-radius: 8px; padding: 8px 10px; }
+  .map-mission b { display: block; font-size: 13px; }
+  .map-mission span { font-size: 11px; color: var(--muted); }
+  .map-hint { margin-top: 14px; color: var(--muted); font-size: 12px; text-align: center; letter-spacing: 0.08em; }
+
+  #screen-pause, #screen-busted, #screen-wasted { background: rgba(6, 8, 14, 0.78); text-align: center; }
+  #screen-pause .screen-inner, #screen-busted .screen-inner, #screen-wasted .screen-inner { width: 480px; }
+  .big-word { font-size: 64px; font-weight: 900; letter-spacing: 0.06em; margin: 0; font-family: Impact, "Arial Black", sans-serif; }
+  #screen-busted .big-word { color: #3b82f6; }
+  #screen-wasted .big-word { color: var(--red); }
+  .screen p { color: var(--muted); font-size: 15px; }
+  .screen .menu-btn { text-align: center; width: 100%; margin-top: 8px; }
+</style>
+</head>
+<body>
+<canvas id="game" aria-label="Tallow Point: drive, steal cars, outrun the Tallow PD and run five story missions"></canvas>
+<p id="status" role="status" aria-live="polite"></p>
+
+<div id="hud" class="hidden">
+  <div id="hud-topleft">
+    <div>
+      <div id="stars">☆☆☆☆☆</div>
+      <div id="wanted-label">CLEAN</div>
+    </div>
+    <div class="panel">
+      <div id="cash-row"><span id="cash">$250</span><span id="clock">17:30</span></div>
+      <div style="margin-top:6px"><span class="label">DISTRICT</span></div>
+      <div id="district-name">CRATER ROW</div>
+      <div id="district-sub">THE FOUNDRY</div>
+      <div class="bar"><i id="district-standing-fill" style="width:58%"></i></div>
+      <div id="district-standing-text">NEUTRAL · 58</div>
+    </div>
+  </div>
+
+  <div id="mission-panel" class="panel">
+    <div id="mission-number">MISSION 1 OF 5</div>
+    <div id="mission-name">COURIER RUN</div>
+    <div id="mission-stage">STAGE —/3</div>
+    <div id="mission-objective">Press M to start the next job</div>
+    <div id="mission-meta"><span id="mission-timer">—:——</span><span id="mission-payout">$500</span></div>
+  </div>
+
+  <div id="dispatch-board" class="panel">
+    <div id="dispatch-count">TALLOW PD RESPONSE 0 UNITS · CODE 4</div>
+    <div id="dispatch-rows"></div>
+  </div>
+
+  <div id="hud-bottomleft">
+    <div class="panel vitals">
+      <div class="bar"><i id="life-fill" style="width:100%"></i></div>
+      <div class="row"><span id="life-text">LIFE 100</span><span id="armor-text">ARMOR 50</span></div>
+      <div class="bar" style="margin-top:4px"><i id="armor-fill" style="width:50%"></i></div>
+    </div>
+    <div class="panel">
+      <div id="weapon-box"><span id="weapon-icon">🔫</span><div><div id="weapon-name">PISTOL</div><div id="weapon-ammo">12/48 AMMO</div></div></div>
+      <div id="weapon-list"></div>
+    </div>
+    <div class="panel">
+      <div id="car-box"><span id="car-name">ON FOOT</span><span id="car-condition">—</span></div>
+      <div class="bar"><i id="car-condition-fill" style="width:87%"></i></div>
+      <div style="display:flex;justify-content:space-between;margin-top:5px"><span id="respect-rank">RANK 2 · WHEELMAN</span><span id="respect-text">140/250 RESPECT</span></div>
+      <div class="bar"><i id="respect-fill" style="width:56%"></i></div>
+    </div>
+  </div>
+
+  <div id="hud-bottomcenter">
+    <div id="crew-row"></div>
+    <div id="fixer-card" class="panel">
+      <div id="fixer-portrait" class="portrait" style="background:#2fae8f">SM</div>
+      <div><div id="fixer-name">SINTA MARLOWE · FIXER · SUNMERE</div><div id="fixer-dialog">“Drop it clean and the Strand is yours.”</div></div>
+    </div>
+  </div>
+
+  <div id="hud-bottomright">
+    <canvas id="minimap" width="190" height="190"></canvas>
+    <div id="speed-box" class="panel"><span id="speed">0</span><span id="speed-unit">KM/H</span></div>
+    <div id="radio-line" class="panel">RADIO TALLOW 98.4 — 'Golden Hour'</div>
+  </div>
+
+  <div id="prompt"></div>
+  <div id="toast"></div>
+  <div id="crosshair"></div>
+</div>
+
+<div id="screen-title" class="screen show">
+  <div>
+    <div class="title-kicker">SUN-SOAKED OPEN-WORLD CRIME</div>
+    <h1 class="title">TALLOW<br>POINT</h1>
+    <div class="title-tag">A CITY OF FIVE DISTRICTS. ONE LAST SCORE.</div>
+    <div class="title-menu">
+      <button id="btn-continue" class="menu-btn primary">▶ CONTINUE</button>
+      <button id="btn-new" class="menu-btn">＋ NEW GAME</button>
+      <button id="btn-map" class="menu-btn">🗺 CITY MAP &amp; STATS</button>
+    </div>
+    <div id="title-save-slot">ACT I — PALMA STRAND · 12%</div>
+  </div>
+  <div class="title-footer">A CITY OF FIVE DISTRICTS · 5 STORY MISSIONS · TALLOW PD PURSUIT AI · RADIO TALLOW 98.4</div>
+</div>
+
+<div id="screen-map" class="screen">
+  <div class="screen-inner">
+    <div class="map-head"><h2>TALLOW POINT — CITY MAP</h2><span>TAB / ENTER TO RETURN</span></div>
+    <div id="map-stats"></div>
+    <div class="map-grid">
+      <div id="map-districts"></div>
+      <div id="map-missions"></div>
+    </div>
+    <div class="map-hint">FIVE DISTRICTS · FIVE FIXERS · FIVE STORY MISSIONS — STANDINGS SHIFT AS YOU WORK THE CITY</div>
+  </div>
+</div>
+
+<div id="screen-pause" class="screen">
+  <div class="screen-inner">
+    <p class="big-word">PAUSED</p>
+    <p>Take a breath. Tallow Point waits for no one — except right now.</p>
+    <button id="btn-resume" class="menu-btn primary">▶ RESUME</button>
+    <button id="btn-quit-title" class="menu-btn">TITLE SCREEN</button>
+  </div>
+</div>
+
+<div id="screen-busted" class="screen">
+  <div class="screen-inner">
+    <p class="big-word">BUSTED</p>
+    <p>Tallow PD took you in. Bail cost you $150 — the crew is already planning the next score.</p>
+    <button id="btn-respawn" class="menu-btn primary">↻ BACK ON THE STREETS (R)</button>
+  </div>
+</div>
+
+<div id="screen-wasted" class="screen">
+  <div class="screen-inner">
+    <p class="big-word">WASTED</p>
+    <p>The city got the better of you this time. Your crew drags you back to the safehouse.</p>
+    <button id="btn-respawn2" class="menu-btn primary">↻ BACK ON THE STREETS (R)</button>
+  </div>
+</div>
+
+<script src="./vendor/three.min.js"></script>
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
